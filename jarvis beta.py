@@ -4,19 +4,61 @@ import subprocess
 import webbrowser
 import urllib.parse
 import wikipedia
+import speech_recognition as sr
+import pyttsx3
+import sounddevice as sd
+import numpy as np
 
 # Настраиваем Википедию на русский язык
 wikipedia.set_lang("ru")
 
+# Инициализируем движок озвучки
+engine = pyttsx3.init()
+voices = engine.getProperty('voices')
+for voice in voices:
+    if "russian" in voice.name.lower() or "ru" in voice.id.lower():
+        engine.setProperty('voice', voice.id)
+        break
+engine.setProperty('rate', 180)
+
 def speak(text):
-    """Функция вывода текста Джарвиса в консоль"""
+    """Функция вывода текста Джарвиса в консоль и озвучки голосом"""
     print(f"Джарвис: {text}", flush=True)
+    engine.say(text)
+    engine.runAndWait()
 
 def listen_command():
-    """Ввод команд через клавиатуру для проверки работы программы"""
-    print("\n[Введите команду в консоль и нажмите Enter]: ", end="", flush=True)
-    command = input()
-    return command.lower()
+    """Распознавание команд через микрофон без использования PyAudio"""
+    recognizer = sr.Recognizer()
+    sample_rate = 16000  # Частота дискретизации для Google API
+    duration = 5         # Сколько секунд Джарвис слушает за один раз
+    
+    try:
+        print("\n[Джарвис слушает...] ", end="", flush=True)
+        
+        # Записываем аудио напрямую в массив данных через sounddevice
+        audio_data = sd.rec(int(duration * sample_rate), samplerate=sample_rate, channels=1, dtype='int16')
+        sd.wait()  # Ждем, пока пройдут 5 секунд записи
+        
+        print("Распознаю...", flush=True)
+        
+        # Конвертируем массив numpy в объект AudioData, который понимает распознаватель
+        byte_data = audio_data.tobytes()
+        audio_to_recognize = sr.AudioData(byte_data, sample_rate, 2)
+        
+        # Отправляем аудио в облако Google
+        command = recognizer.recognize_google(audio_to_recognize, language="ru-RU")
+        print(f"Вы сказали: {command}")
+        return command.lower()
+        
+    except sr.UnknownValueError:
+        print("[Речь не распознана]")
+        return ""
+    except Exception as e:
+        # Если микрофон отключен, плавно переходим на ввод с клавиатуры
+        print(f"\n[Консольный режим ввода]: ", end="", flush=True)
+        command = input()
+        return command.lower()
 
 def open_windows_app(possible_paths, app_name):
     """Вспомогательная функция для безопасного запуска .exe в Windows"""
@@ -31,7 +73,6 @@ def open_windows_app(possible_paths, app_name):
 def open_vscode():
     """Запуск VS Code напрямую через системную команду Windows"""
     try:
-        # Windows сама найдет и запустит VS Code по ключевому слову code
         os.system("start code")
         speak("Открываю вижуал студио код, сэр.")
     except Exception:
@@ -54,9 +95,7 @@ def open_steam():
         r"C:\Program Files (x86)\Steam\Steam.exe", 
         r"C:\Program Files\Steam\Steam.exe"
     ]
-    # Сначала пытаемся найти файл в стандартных папках
     if not open_windows_app(paths, "стим"):
-        # Если не нашли, принудительно запускаем через системный протокол Windows
         speak("Запускаю Стим через системный протокол, сэр.")
         webbrowser.open("steam://open/main")
 
@@ -96,11 +135,9 @@ def execute_command(command):
     else:
         print(f"Джарвис ищет в Википедии: {command}...", flush=True)
         try:
-            # Шаг 1: Ищем похожие статьи по нашему запросу
             search_results = wikipedia.search(command)
             
             if search_results:
-                # Если статьи найдены, берем самый первый (точный) результат
                 exact_page = search_results[0]
                 summary = wikipedia.summary(exact_page, sentences=2)
                 speak(summary)
@@ -108,7 +145,6 @@ def execute_command(command):
                 speak("Сэр, мне не удалось найти информацию об этом даже в поиске Википедии.")
                 
         except wikipedia.exceptions.DisambiguationError as e:
-            # Если нашлось много вариантов, берем первый предложенный вариант из списка альтернатив
             try:
                 summary = wikipedia.summary(e.options[0], sentences=2)
                 speak(summary)
