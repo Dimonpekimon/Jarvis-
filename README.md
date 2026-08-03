@@ -23,7 +23,7 @@
 
 📦 Установка
 1. Клонирование
-git clone https://github.com/ТВОЙ_НИК/jarvis-assistant.git
+git clone https://github.com/Dimonpekimon/jarvis-assistant.git
 cd jarvis-assistant
 2. Виртуальное окружение (рекомендуется)
 python -m venv venv
