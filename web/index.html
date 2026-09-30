@@ -1,0 +1,855 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Джарвис</title>
+<style>
+  :root{
+    --bg:#04070e;
+    --panel-top:rgba(9,15,28,.94);
+    --panel-bottom:rgba(4,8,16,.97);
+    --line:rgba(120,180,255,.11);
+    --line-strong:rgba(120,180,255,.20);
+    --text:#dce8f7;
+    --dim:#6d809b;
+    --dim-2:#465a72;
+    --cyan:#38c8ff;
+    --cyan-soft:#8ceaff;
+    --blue:#1f6bff;
+    --danger:#ff7089;
+    --font:"Segoe UI", system-ui, -apple-system, "Helvetica Neue", sans-serif;
+    --mono:ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  }
+
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; overflow:hidden; background:var(--bg); color:var(--text);
+    font-family:var(--font); -webkit-font-smoothing:antialiased;
+  }
+
+  /* ---------- каркас ---------- */
+  .app{
+    display:grid; grid-template-columns:1fr 396px;
+    height:100vh; height:100dvh;
+    transition:grid-template-columns .38s cubic-bezier(.4,0,.2,1);
+  }
+  body.solo .app{grid-template-columns:1fr 0px}
+  body.solo .panel{opacity:0; pointer-events:none; border-left-color:transparent}
+
+  /* ---------- сцена с ядром ---------- */
+  .stage{
+    position:relative; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:24px; min-width:0;
+  }
+  .stage::before{
+    content:""; position:absolute; inset:0; pointer-events:none;
+    background:
+      radial-gradient(58% 52% at 50% 46%, rgba(30,92,224,.17), transparent 72%),
+      radial-gradient(30% 26% at 50% 46%, rgba(56,200,255,.09), transparent 70%);
+  }
+  .core-wrap{position:relative; width:min(60vh, 44vw, 540px); aspect-ratio:1}
+  svg.core{display:block; width:100%; height:100%; overflow:visible}
+
+  .readout{display:flex; flex-direction:column; align-items:center; gap:9px; z-index:1}
+  .state{
+    font:600 12px/1 var(--mono); letter-spacing:.44em; text-transform:uppercase;
+    color:var(--cyan-soft); text-shadow:0 0 20px rgba(56,200,255,.55);
+    transition:color .3s, text-shadow .3s; padding-left:.44em;
+  }
+  body[data-state="idle"] .state{color:#7d97b5; text-shadow:none}
+  body[data-state="thinking"] .state{color:#9fd0ff}
+  body[data-state="listening"] .state{color:#b6f4ff}
+  .state-line{width:158px; height:1px; background:linear-gradient(90deg, transparent, rgba(96,196,255,.55), transparent)}
+  .hint{
+    font:11px/1.6 var(--mono); color:var(--dim-2); letter-spacing:.05em;
+    text-align:center; max-width:420px;
+  }
+
+  /* ---------- панель диалога ---------- */
+  .panel{
+    display:flex; flex-direction:column; min-width:0; min-height:0; overflow:hidden;
+    border-left:1px solid var(--line);
+    background:linear-gradient(180deg, var(--panel-top), var(--panel-bottom));
+    transition:opacity .28s;
+  }
+  .panel-head{
+    display:flex; align-items:center; gap:10px;
+    padding:15px 16px 13px; border-bottom:1px solid var(--line);
+  }
+  .panel-title{
+    font:600 11px/1 var(--mono); letter-spacing:.24em; text-transform:uppercase;
+    color:var(--dim); white-space:nowrap;
+  }
+  .badge{
+    font:600 9.5px/1 var(--mono); letter-spacing:.14em; text-transform:uppercase;
+    padding:4px 7px; border-radius:5px; white-space:nowrap;
+    border:1px solid var(--line-strong); color:var(--dim);
+  }
+  .badge.ok{color:#7ef0c0; border-color:rgba(80,240,190,.28)}
+  .badge.demo{color:#ffc98a; border-color:rgba(255,190,110,.28)}
+  .badge.warn{color:#ff9db0; border-color:rgba(255,120,150,.28)}
+  .spacer{flex:1}
+  .icon-btn{
+    appearance:none; cursor:pointer; white-space:nowrap;
+    background:transparent; border:1px solid var(--line); color:var(--dim);
+    border-radius:7px; padding:5px 9px;
+    font:600 10px/1 var(--mono); letter-spacing:.1em; text-transform:uppercase;
+    transition:.16s;
+  }
+  .icon-btn:hover{color:var(--cyan-soft); border-color:var(--line-strong); background:rgba(56,200,255,.06)}
+  .icon-btn:active{transform:translateY(1px)}
+  .icon-btn.danger:hover{color:var(--danger); border-color:rgba(255,112,137,.35); background:rgba(255,112,137,.07)}
+
+  .status-line{
+    padding:9px 16px; border-bottom:1px solid var(--line);
+    font:10.5px/1.5 var(--mono); color:var(--dim-2);
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+    overflow:hidden; min-height:0;
+  }
+  .status-line:empty{display:none}
+
+  /* ---------- лента сообщений ---------- */
+  .log{
+    flex:1; min-height:0; overflow-y:auto; overscroll-behavior:contain;
+    padding:16px 16px 6px; display:flex; flex-direction:column; gap:13px;
+    scrollbar-width:thin; scrollbar-color:rgba(120,180,255,.18) transparent;
+  }
+  .log::-webkit-scrollbar{width:8px}
+  .log::-webkit-scrollbar-thumb{background:rgba(120,180,255,.16); border-radius:4px}
+  .log::-webkit-scrollbar-track{background:transparent}
+
+  .msg{position:relative; padding-left:11px; border-left:2px solid transparent; animation:in .28s ease both}
+  @keyframes in{from{opacity:0; transform:translateY(5px)} to{opacity:1; transform:none}}
+  .msg.user{border-color:rgba(120,200,255,.34)}
+  .msg.assistant{border-color:rgba(56,140,255,.62)}
+  .msg.system{border-color:rgba(255,255,255,.1)}
+  .msg.edited .meta::after{
+    content:"изменено"; color:var(--dim-2); letter-spacing:.14em;
+  }
+  .msg .meta{
+    display:flex; align-items:center; gap:8px; margin-bottom:5px;
+    font:600 9.5px/1 var(--mono); letter-spacing:.2em; text-transform:uppercase;
+    color:var(--dim-2);
+  }
+  .msg.user .meta .who{color:rgba(140,205,255,.75)}
+  .msg.assistant .meta .who{color:rgba(90,160,255,.85)}
+  .msg .body{
+    font-size:14.5px; line-height:1.56; color:var(--text);
+    white-space:pre-wrap; overflow-wrap:anywhere;
+  }
+  .msg.user .body{color:#cfe6ff}
+  .msg.system .body{color:var(--dim); font-size:12.5px; font-style:italic}
+  .msg .acts{
+    position:absolute; top:-3px; right:0; display:flex; gap:4px;
+    opacity:0; transition:opacity .16s;
+  }
+  .msg:hover .acts, .msg:focus-within .acts{opacity:1}
+  .msg .acts button{
+    appearance:none; cursor:pointer; width:22px; height:22px; padding:0;
+    display:grid; place-items:center; font-size:12px; line-height:1;
+    background:rgba(9,16,30,.92); border:1px solid var(--line-strong);
+    color:var(--dim); border-radius:6px; transition:.15s;
+  }
+  .msg .acts button:hover{color:var(--cyan-soft); border-color:rgba(90,200,255,.45)}
+  .typing{display:flex; gap:4px; padding:6px 0}
+  .typing i{
+    width:4px; height:4px; border-radius:50%; background:var(--cyan); opacity:.35;
+    animation:blip 1.15s infinite;
+  }
+  .typing i:nth-child(2){animation-delay:.16s}
+  .typing i:nth-child(3){animation-delay:.32s}
+  @keyframes blip{0%,60%,100%{opacity:.22; transform:translateY(0)} 30%{opacity:1; transform:translateY(-2.5px)}}
+
+  /* ---------- ввод ---------- */
+  .composer{
+    display:flex; gap:9px; align-items:flex-end;
+    padding:12px 14px 14px; border-top:1px solid var(--line);
+  }
+  .composer textarea{
+    flex:1; min-width:0; resize:none; min-height:42px; max-height:148px;
+    padding:11px 13px; border-radius:12px;
+    background:rgba(255,255,255,.028); border:1px solid var(--line-strong);
+    color:var(--text); font:14px/1.45 var(--font); outline:none; transition:.16s;
+  }
+  .composer textarea::placeholder{color:var(--dim-2)}
+  .composer textarea:focus{
+    border-color:rgba(80,190,255,.5);
+    box-shadow:0 0 0 3px rgba(56,200,255,.07);
+    background:rgba(56,200,255,.04);
+  }
+  .send{
+    flex:0 0 auto; width:42px; height:42px; padding:0; cursor:pointer;
+    display:grid; place-items:center; border-radius:12px;
+    border:1px solid rgba(80,190,255,.38); color:var(--cyan-soft);
+    background:linear-gradient(180deg, rgba(56,200,255,.2), rgba(31,107,255,.14));
+    transition:.16s;
+  }
+  .send:hover{border-color:rgba(120,220,255,.65); box-shadow:0 0 18px rgba(56,200,255,.18)}
+  .send:active{transform:translateY(1px)}
+  .send svg{width:17px; height:17px}
+
+  /* ---------- узкие экраны ---------- */
+  @media (max-width: 900px){
+    .app{grid-template-columns:1fr; grid-template-rows:1fr auto}
+    body.solo .app{grid-template-rows:1fr 0px}
+    .panel{border-left:none; border-top:1px solid var(--line); max-height:52vh}
+    .core-wrap{width:min(38vh, 74vw)}
+    .status-line{display:none}
+  }
+</style>
+</head>
+<body data-state="idle">
+<div class="app">
+
+  <section class="stage">
+    <div class="core-wrap">
+      <svg class="core" viewBox="0 0 680 680" aria-hidden="true">
+        <defs>
+          <radialGradient id="bloomGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stop-color="#2ea8ff" stop-opacity=".42"/>
+            <stop offset="34%"  stop-color="#1b62e6" stop-opacity=".17"/>
+            <stop offset="66%"  stop-color="#0d2f8a" stop-opacity=".05"/>
+            <stop offset="100%" stop-color="#04102e" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stop-color="#eafcff" stop-opacity=".95"/>
+            <stop offset="34%"  stop-color="#63e2ff" stop-opacity=".62"/>
+            <stop offset="68%"  stop-color="#1f7bff" stop-opacity=".22"/>
+            <stop offset="100%" stop-color="#0b2a7a" stop-opacity="0"/>
+          </radialGradient>
+          <radialGradient id="baseGrad" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stop-color="#0d2f5e" stop-opacity=".95"/>
+            <stop offset="100%" stop-color="#061428" stop-opacity=".9"/>
+          </radialGradient>
+        </defs>
+
+        <circle id="bloom" cx="340" cy="340" r="330" fill="url(#bloomGrad)"/>
+
+        <g id="core">
+          <circle id="coreGlow" cx="340" cy="340" r="168" fill="url(#coreGrad)"/>
+          <g id="ripples"></g>
+
+          <!-- внешнее кольцо: широкие сегменты + подсветка -->
+          <circle id="ringSegGlow" cx="340" cy="340" r="252" fill="none"
+                  stroke="#1f6bff" stroke-width="34" stroke-linecap="round" opacity=".2"/>
+          <circle id="ringSeg" cx="340" cy="340" r="252" fill="none"
+                  stroke="#2ea8ff" stroke-width="22" stroke-linecap="round" opacity=".92"/>
+
+          <!-- среднее кольцо -->
+          <circle id="ringMidGlow" cx="340" cy="340" r="214" fill="none"
+                  stroke="#2f8bff" stroke-width="14" stroke-linecap="round" opacity=".18"/>
+          <circle id="ringMid" cx="340" cy="340" r="214" fill="none"
+                  stroke="#5fd8ff" stroke-width="8" stroke-linecap="round" opacity=".78"/>
+
+          <!-- четыре короткие дуги между кольцами -->
+          <circle id="arcs" cx="340" cy="340" r="196" fill="none"
+                  stroke="#3f9dff" stroke-width="4" stroke-linecap="round" opacity=".5"/>
+
+          <!-- риски -->
+          <circle id="ticks" cx="340" cy="340" r="176" fill="none"
+                  stroke="#6fe0ff" stroke-width="7" stroke-linecap="butt" opacity=".45"/>
+
+          <!-- ядро: подложка + соты -->
+          <circle id="sphereBase" cx="340" cy="340" r="92" fill="url(#baseGrad)"/>
+          <g id="honeycomb"></g>
+          <circle id="sphereRim" cx="340" cy="340" r="93" fill="none"
+                  stroke="rgba(120,220,255,.3)" stroke-width="1.2"/>
+        </g>
+      </svg>
+    </div>
+
+    <div class="readout">
+      <div class="state" id="stateLabel">ожидание</div>
+      <div class="state-line"></div>
+      <div class="hint" id="hint">Enter — отправить · Esc — перебить</div>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <div class="panel-head">
+      <span class="panel-title">Диалог</span>
+      <span class="badge" id="badge">связь…</span>
+      <span class="spacer"></span>
+      <button class="icon-btn danger" id="stopBtn" title="Прервать речь (Esc)">стоп</button>
+      <button class="icon-btn" id="resetBtn" title="Забыть историю диалога">сброс</button>
+      <button class="icon-btn" id="clearBtn" title="Очистить ленту на экране">очистить</button>
+      <button class="icon-btn" id="soloBtn" title="Скрыть панель диалога">свернуть</button>
+    </div>
+    <div class="status-line" id="statusText"></div>
+    <div class="log" id="log"></div>
+    <div class="composer">
+      <textarea id="composer" rows="1" placeholder="Скажите или напишите…" spellcheck="false"></textarea>
+      <button class="send" id="send" title="Отправить (Enter)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 12h14M13 6l6 6-6 6"/>
+        </svg>
+      </button>
+    </div>
+  </aside>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var NS = 'http://www.w3.org/2000/svg';
+  var CENTER = 340;
+  var SPHERE_R = 92;
+
+  var $ = function (id) { return document.getElementById(id); };
+  var clamp = function (v, a, b) { return Math.min(b, Math.max(a, v)); };
+
+  var el = {
+    core: $('core'), coreGlow: $('coreGlow'), bloom: $('bloom'),
+    ringSeg: $('ringSeg'), ringSegGlow: $('ringSegGlow'),
+    ringMid: $('ringMid'), ringMidGlow: $('ringMidGlow'),
+    arcs: $('arcs'), ticks: $('ticks'),
+    honeycomb: $('honeycomb'), sphereBase: $('sphereBase'), sphereRim: $('sphereRim'),
+    ripples: $('ripples'),
+    stateLabel: $('stateLabel'), hint: $('hint'), statusText: $('statusText'),
+    log: $('log'), composer: $('composer'), send: $('send'), badge: $('badge'),
+    stopBtn: $('stopBtn'), clearBtn: $('clearBtn'), resetBtn: $('resetBtn'), soloBtn: $('soloBtn')
+  };
+
+  var LABELS = {
+    idle: 'ожидание', listening: 'слушаю', thinking: 'думаю',
+    speaking: 'говорю', loading: 'загрузка'
+  };
+
+  /* =================================================================
+     ГЕОМЕТРИЯ КОЛЬЦА
+     ================================================================= */
+  function dashRing(node, radius, count, gap) {
+    var circumference = 2 * Math.PI * radius;
+    var dash = circumference / count - gap;
+    node.setAttribute('stroke-dasharray', dash.toFixed(2) + ' ' + gap);
+    node.setAttribute('stroke-dashoffset', (dash / 2).toFixed(2));
+  }
+
+  function buildRings() {
+    dashRing(el.ringSeg, 252, 16, 26);
+    dashRing(el.ringSegGlow, 252, 16, 26);
+    dashRing(el.ringMid, 214, 24, 14);
+    dashRing(el.ringMidGlow, 214, 24, 14);
+    dashRing(el.arcs, 196, 4, 219);
+    dashRing(el.ticks, 176, 60, 12);
+    el.arcs.setAttribute('transform', 'rotate(38 340 340)');
+  }
+
+  /* =================================================================
+     СОТЫ ВНУТРИ ЯДРА
+     ================================================================= */
+  var honeyLayers = [];
+
+  function dotColor(t) {
+    var from = [230, 250, 255], to = [40, 150, 255];
+    var k = clamp(t * 1.05, 0, 1);
+    return 'rgb(' + Math.round(from[0] + (to[0] - from[0]) * k) + ',' +
+                    Math.round(from[1] + (to[1] - from[1]) * k) + ',' +
+                    Math.round(from[2] + (to[2] - from[2]) * k) + ')';
+  }
+
+  function buildHoneycomb() {
+    var spacing = 9.6, dot = 2.7;
+    var stepY = spacing * Math.sqrt(3) / 2;
+    var rows = Math.ceil(SPHERE_R / stepY) + 2;
+    var cols = Math.ceil(SPHERE_R / spacing) + 2;
+
+    var layers = [0, 1, 2].map(function () { return document.createElementNS(NS, 'g'); });
+    var frags = [0, 1, 2].map(function () { return document.createDocumentFragment(); });
+
+    for (var row = -rows; row <= rows; row++) {
+      for (var col = -cols; col <= cols; col++) {
+        var x = spacing * (col + row / 2);
+        var y = stepY * row;
+        var dist = Math.sqrt(x * x + y * y);
+        if (dist > SPHERE_R) continue;
+
+        var t = dist / SPHERE_R;
+        // Лёгкая спиральная неоднородность — чтобы соты не выглядели штампом.
+        var swirl = 0.5 + 0.5 * Math.sin(Math.atan2(y, x) * 3 + dist * 0.26);
+
+        var node = document.createElementNS(NS, 'circle');
+        node.setAttribute('cx', (CENTER + x).toFixed(2));
+        node.setAttribute('cy', (CENTER + y).toFixed(2));
+        node.setAttribute('r', (dot * (1 - 0.4 * t)).toFixed(2));
+        node.setAttribute('fill', dotColor(t));
+        node.setAttribute('opacity',
+          (0.08 + 0.92 * Math.pow(1 - t, 1.25) * (0.68 + 0.32 * swirl)).toFixed(3));
+
+        frags[t < 0.42 ? 0 : t < 0.74 ? 1 : 2].appendChild(node);
+      }
+    }
+
+    layers.forEach(function (layer, index) {
+      layer.appendChild(frags[index]);
+      layer.setAttribute('opacity', '0.9');
+      el.honeycomb.appendChild(layer);
+    });
+    honeyLayers = layers;
+  }
+
+  /* =================================================================
+     ВОЛНЫ ОТ ЯДРА
+     ================================================================= */
+  var ripples = [];
+
+  function buildRipples() {
+    for (var i = 0; i < 3; i++) {
+      var node = document.createElementNS(NS, 'circle');
+      node.setAttribute('cx', CENTER);
+      node.setAttribute('cy', CENTER);
+      node.setAttribute('fill', 'none');
+      node.setAttribute('stroke', '#5fd8ff');
+      node.setAttribute('stroke-width', '1.6');
+      node.setAttribute('opacity', '0');
+      el.ripples.appendChild(node);
+      ripples.push({ node: node, t: 2 });
+    }
+  }
+
+  function spawnRipple() {
+    for (var i = 0; i < ripples.length; i++) {
+      if (ripples[i].t >= 1) { ripples[i].t = 0; return; }
+    }
+  }
+
+  /* =================================================================
+     СОСТОЯНИЕ И ЗВУК
+     ================================================================= */
+  var state = 'idle';
+  var level = 0;              // сглаженная громкость 0..1
+  var levelTarget = 0;
+  var lastRealLevel = -1e9;   // когда последний раз пришёл настоящий уровень
+  var synthPhase = 0;
+  var lastRipple = 0;
+  var pendingIdle = null;
+
+  function setState(value) {
+    if (!value || value === state) return;
+    state = value;
+    el.stateLabel.textContent = LABELS[value] || value;
+    document.body.dataset.state = value;
+  }
+
+  function applyState(value) {
+    if (!value) return;
+    // Ядро объявляет «idle» и сразу за ним «speaking» — гасим мигание.
+    if (value === 'idle') {
+      clearTimeout(pendingIdle);
+      pendingIdle = setTimeout(function () { setState('idle'); }, 240);
+      return;
+    }
+    clearTimeout(pendingIdle);
+    setState(value);
+  }
+
+  /* =================================================================
+     АНИМАЦИЯ
+     ================================================================= */
+  var last = 0;
+
+  function frame(now) {
+    var dt = Math.min(0.05, (now - last) / 1000) || 0.016;
+    last = now;
+    var t = now / 1000;
+
+    var speaking = state === 'speaking';
+    var listening = state === 'listening';
+    var thinking = state === 'thinking';
+
+    // ---- цель громкости ----
+    if (now - lastRealLevel > 380) {
+      if (speaking) {
+        // Запасной вариант: SAPI и подобные движки не отдают громкость —
+        // рисуем правдоподобную огибающую речи.
+        synthPhase += dt * 11;
+        var s = Math.sin(synthPhase);
+        var env = 0.44 + 0.34 * s * Math.sin(synthPhase * 0.37 + 1.1)
+                       + 0.18 * Math.sin(synthPhase * 2.7 + 0.6);
+        levelTarget = clamp(env, 0.06, 1);
+      } else if (listening) {
+        levelTarget = 0.07 + 0.035 * Math.sin(t * 2.1);
+      } else {
+        levelTarget = 0;
+      }
+    } else if (now - lastRealLevel > 120) {
+      levelTarget *= 0.86;   // затухание между словами
+    }
+    level += (levelTarget - level) * Math.min(1, dt * 16);
+
+    // ---- корпус ядра: дыхание + толчок от голоса + мелкая дрожь ----
+    var breathe = Math.sin(t * (speaking ? 2.4 : 1.1)) * (speaking ? 0.006 : 0.012);
+    var scale = 1 + breathe + level * 0.085;
+    var jitter = speaking ? level * 1.9 : 0;
+    var jx = (Math.random() - 0.5) * jitter;
+    var jy = (Math.random() - 0.5) * jitter;
+    el.core.setAttribute('transform',
+      'translate(' + (CENTER + jx).toFixed(2) + ' ' + (CENTER + jy).toFixed(2) + ') ' +
+      'scale(' + scale.toFixed(4) + ') translate(-340 -340)');
+
+    // ---- вращение колец ----
+    var wobble = speaking ? Math.sin(t * 9) * level * 1.4 : 0;
+    var outer = t * (speaking ? 26 : listening ? 34 : 9) + wobble;
+    var mid = -t * (speaking ? 34 : listening ? 22 : 13);
+    el.ringSeg.setAttribute('transform', 'rotate(' + outer.toFixed(2) + ' 340 340)');
+    el.ringSegGlow.setAttribute('transform', 'rotate(' + outer.toFixed(2) + ' 340 340)');
+    el.ringMid.setAttribute('transform', 'rotate(' + mid.toFixed(2) + ' 340 340)');
+    el.ringMidGlow.setAttribute('transform', 'rotate(' + mid.toFixed(2) + ' 340 340)');
+    el.arcs.setAttribute('transform', 'rotate(' + (38 - t * 18).toFixed(2) + ' 340 340)');
+    el.ticks.setAttribute('transform', 'rotate(' + (t * 6).toFixed(2) + ' 340 340)');
+
+    // ---- соты ----
+    var honeySpin = thinking ? t * 24 : (speaking ? Math.sin(t * 3.1) * 2.4 * level : 0);
+    el.honeycomb.setAttribute('transform', 'rotate(' + honeySpin.toFixed(2) + ' 340 340)');
+    for (var i = 0; i < honeyLayers.length; i++) {
+      var base = [0.62, 0.52, 0.44][i];
+      var pulse = 0.5 + 0.5 * Math.sin(t * (speaking ? 7 : 2.2) + i * 2.1);
+      honeyLayers[i].setAttribute('opacity',
+        (base + (speaking ? 0.38 : 0.1) * pulse * (0.55 + level)).toFixed(3));
+    }
+
+    // ---- свечение ----
+    el.coreGlow.setAttribute('opacity', (0.52 + level * 0.5).toFixed(3));
+    el.bloom.setAttribute('opacity', (0.72 + level * 0.5).toFixed(3));
+    el.sphereBase.setAttribute('opacity', (0.92 - level * 0.22).toFixed(3));
+    el.sphereRim.setAttribute('opacity', (0.3 + level * 0.5).toFixed(3));
+    el.ringSeg.setAttribute('opacity', (0.86 + level * 0.14).toFixed(3));
+
+    // ---- волны ----
+    if (speaking && level > 0.22 && now - lastRipple > 420) {
+      spawnRipple();
+      lastRipple = now;
+    }
+    for (var r = 0; r < ripples.length; r++) {
+      var rip = ripples[r];
+      if (rip.t >= 1) { continue; }
+      rip.t += dt / 1.15;
+      var progress = Math.min(1, rip.t);
+      rip.node.setAttribute('r', (SPHERE_R + 6 + progress * 232).toFixed(1));
+      rip.node.setAttribute('opacity', ((1 - progress) * 0.42).toFixed(3));
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  /* =================================================================
+     ЛЕНТА ДИАЛОГА
+     ================================================================= */
+  var editing = null;          // {node, role} — правка существующей реплики
+  var lastEditEcho = null;     // чтобы не задвоить отредактированную реплику
+
+  function atBottom() {
+    return el.log.scrollHeight - el.log.scrollTop - el.log.clientHeight < 90;
+  }
+
+  function scrollToEnd() {
+    el.log.scrollTop = el.log.scrollHeight;
+  }
+
+  function stamp(ts) {
+    var date = ts ? new Date(ts) : new Date();
+    if (isNaN(date.getTime())) date = new Date();
+    return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function actButton(glyph, title, handler) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = glyph;
+    button.title = title;
+    button.addEventListener('click', function (event) {
+      event.stopPropagation();
+      handler();
+    });
+    return button;
+  }
+
+  function addMessage(role, text, ts) {
+    var stick = atBottom();
+    var node = document.createElement('div');
+    node.className = 'msg ' + role;
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    var who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = role === 'user' ? 'вы' : role === 'assistant' ? 'джарвис' : 'система';
+    var time = document.createElement('span');
+    time.textContent = stamp(ts);
+    meta.appendChild(who);
+    meta.appendChild(time);
+
+    var body = document.createElement('div');
+    body.className = 'body';
+    body.textContent = text;
+
+    var acts = document.createElement('div');
+    acts.className = 'acts';
+    if (role === 'user') {
+      acts.appendChild(actButton('✎', 'Изменить и отправить заново', function () {
+        startEdit(node, 'user');
+      }));
+    } else if (role === 'assistant') {
+      acts.appendChild(actButton('✎', 'Изменить и озвучить', function () {
+        startEdit(node, 'assistant');
+      }));
+      acts.appendChild(actButton('⧉', 'Скопировать', function () {
+        if (navigator.clipboard) navigator.clipboard.writeText(body.textContent);
+      }));
+    }
+
+    node.appendChild(meta);
+    node.appendChild(body);
+    if (acts.childElementCount) node.appendChild(acts);
+    el.log.appendChild(node);
+    if (stick) scrollToEnd();
+    return node;
+  }
+
+  function startEdit(node, role) {
+    editing = { node: node, role: role };
+    el.composer.value = node.querySelector('.body').textContent;
+    autoGrow();
+    el.composer.focus();
+    el.composer.setSelectionRange(el.composer.value.length, el.composer.value.length);
+    el.hint.textContent = role === 'user'
+      ? 'правка вашей реплики · Enter — отправить заново'
+      : 'правка ответа · Enter — озвучить';
+  }
+
+  function endEdit() {
+    editing = null;
+    el.hint.textContent = 'Enter — отправить · Esc — перебить';
+  }
+
+  function showTyping(show) {
+    var existing = el.log.querySelector('.msg.typing-holder');
+    if (!show) {
+      if (existing) existing.remove();
+      return;
+    }
+    if (existing) return;
+    var holder = document.createElement('div');
+    holder.className = 'msg assistant typing-holder';
+    var dots = document.createElement('div');
+    dots.className = 'typing';
+    for (var i = 0; i < 3; i++) dots.appendChild(document.createElement('i'));
+    holder.appendChild(dots);
+    el.log.appendChild(holder);
+    scrollToEnd();
+  }
+
+  /* =================================================================
+     СВЯЗЬ С ЯДРОМ
+     ================================================================= */
+  var live = false;
+  var source = null;
+
+  function post(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {})
+    }).catch(function () {});
+  }
+
+  function onEvent(ev) {
+    if (ev.type === 'hello') {
+      if (ev.status) el.statusText.textContent = ev.status;
+      applyState(ev.state);
+      return;
+    }
+    if (ev.type === 'state') { applyState(ev.value); return; }
+    if (ev.type === 'level') {
+      lastRealLevel = performance.now();
+      levelTarget = clamp(Number(ev.value) || 0, 0, 1);
+      return;
+    }
+    if (ev.type === 'message') {
+      if (ev.role === 'user') {
+        // Отредактированную реплику уже показали на месте старой.
+        if (lastEditEcho && lastEditEcho.text === ev.text
+            && performance.now() - lastEditEcho.at < 5000) {
+          lastEditEcho = null;
+          return;
+        }
+        showTyping(true);
+      }
+      if (ev.role === 'assistant') showTyping(false);
+      addMessage(ev.role, ev.text, ev.ts);
+    }
+  }
+
+  function startLive() {
+    live = true;
+    el.badge.textContent = 'на связи';
+    el.badge.className = 'badge ok';
+    source = new EventSource('/api/stream');
+    source.onopen = function () {
+      el.badge.textContent = 'на связи';
+      el.badge.className = 'badge ok';
+    };
+    source.onerror = function () {
+      el.badge.textContent = 'переподключение';
+      el.badge.className = 'badge warn';
+    };
+    source.onmessage = function (event) {
+      var ev;
+      try { ev = JSON.parse(event.data); } catch (err) { return; }
+      onEvent(ev);
+    };
+    setInterval(function () {
+      fetch('/api/state', { cache: 'no-store' })
+        .then(function (r) { return r.json(); })
+        .then(function (data) { if (data && data.status) el.statusText.textContent = data.status; })
+        .catch(function () {});
+    }, 20000);
+  }
+
+  function startDemo() {
+    live = false;
+    el.badge.textContent = 'демо';
+    el.badge.className = 'badge demo';
+    el.statusText.textContent = 'Ядро ассистента не подключено — запустите python main.py';
+    addMessage('system', 'Демонстрационный режим: страница открыта без ядра. Ядро на экране живое, ответы — заготовки.');
+    setState('idle');
+  }
+
+  /* =================================================================
+     ДЕМО-РЕЖИМ
+     ================================================================= */
+  var demoRules = [
+    [/погод/i, 'В Москве сейчас переменная облачность, четырнадцать градусов, к вечеру похолодает.'],
+    [/врем|час(?!т)|который/i, 'Сейчас девятнадцать двадцать четыре, сэр.'],
+    [/громч|тише|звук/i, 'Громкость изменена на десять процентов.'],
+    [/напомн|таймер|будильник/i, 'Напоминание установлено, сэр.'],
+    [/привет|здравств|добрый/i, 'Добрый вечер, сэр. Все системы в норме.'],
+    [/что ты умеешь|команд|помощь/i, 'Я управляю громкостью и яркостью, открываю программы, ставлю напоминания, читаю текст с экрана и отвечаю на вопросы.'],
+    [/яркост|темн|светл/i, 'Яркость экрана снижена на десять процентов.'],
+    [/скриншот|экран/i, 'Снимок экрана сохранён, сэр.']
+  ];
+  var demoFallback = [
+    'Это демонстрационный режим, сэр: ядро интерфейса работает, но ядро ассистента не подключено.',
+    'Запустите python main.py — и я начну слышать вас по-настоящему, а не отвечать заготовками.'
+  ];
+
+  var demoTimer = null;
+
+  function demoSay(text) {
+    setState('speaking');
+    lastRealLevel = -1e9;
+    clearTimeout(demoTimer);
+    demoTimer = setTimeout(function () {
+      showTyping(false);
+      setState('idle');
+    }, Math.min(9000, 900 + text.length * 55));
+  }
+
+  function demoReply(text) {
+    showTyping(true);
+    setState('thinking');
+    lastRealLevel = -1e9;
+    setTimeout(function () {
+      var reply = null;
+      for (var i = 0; i < demoRules.length; i++) {
+        if (demoRules[i][0].test(text)) { reply = demoRules[i][1]; break; }
+      }
+      if (!reply) reply = demoFallback[Math.floor(Math.random() * demoFallback.length)];
+      showTyping(false);
+      addMessage('assistant', reply);
+      demoSay(reply);
+    }, 480 + Math.random() * 520);
+  }
+
+  /* =================================================================
+     ВВОД И КНОПКИ
+     ================================================================= */
+  function autoGrow() {
+    el.composer.style.height = 'auto';
+    el.composer.style.height = Math.min(148, el.composer.scrollHeight) + 'px';
+  }
+
+  function submit() {
+    var text = el.composer.value.trim();
+    if (!text) return;
+    el.composer.value = '';
+    autoGrow();
+
+    var edit = editing;
+    endEdit();
+
+    if (edit) {
+      edit.node.querySelector('.body').textContent = text;
+      edit.node.classList.add('edited');
+      if (edit.role === 'assistant') {
+        if (live) post('/api/speak', { text: text });
+        else demoSay(text);
+        return;
+      }
+      lastEditEcho = { text: text, at: performance.now() };
+    } else if (!live) {
+      addMessage('user', text);
+    }
+
+    showTyping(true);
+    if (live) post('/api/message', { text: text });
+    else demoReply(text);
+  }
+
+  function interrupt() {
+    showTyping(false);
+    if (live) post('/api/interrupt', {});
+    else {
+      clearTimeout(demoTimer);
+      setState('idle');
+    }
+  }
+
+  el.composer.addEventListener('input', autoGrow);
+  el.composer.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      submit();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      el.composer.blur();
+      interrupt();
+    }
+  });
+  el.send.addEventListener('click', submit);
+  el.stopBtn.addEventListener('click', interrupt);
+  el.clearBtn.addEventListener('click', function () { el.log.innerHTML = ''; });
+  el.resetBtn.addEventListener('click', function () {
+    if (live) post('/api/reset', {});
+    else addMessage('system', 'В демо-режиме сбрасывать нечего.');
+  });
+  el.soloBtn.addEventListener('click', function () {
+    document.body.classList.toggle('solo');
+    el.soloBtn.textContent = document.body.classList.contains('solo') ? 'развернуть' : 'свернуть';
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && document.activeElement !== el.composer) interrupt();
+  });
+
+  /* =================================================================
+     СТАРТ
+     ================================================================= */
+  buildRings();
+  buildHoneycomb();
+  buildRipples();
+  requestAnimationFrame(frame);
+  autoGrow();
+
+  fetch('/api/health', { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (data) { if (data && data.ok) startLive(); else startDemo(); })
+    .catch(function () { startDemo(); });
+})();
+</script>
+</body>
+</html>

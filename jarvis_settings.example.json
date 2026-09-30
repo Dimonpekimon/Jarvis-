@@ -1,0 +1,63 @@
+{
+  "_комментарий": "Скопируйте этот файл в jarvis_settings.json и заполните своими значениями. jarvis_settings.json в репозиторий не попадает: в нём лежат токены и личные пути.",
+
+  "DEFAULT_INPUT_MODE": "mixed",
+  "ENABLE_TTS": true,
+  "WAKE_WORD_REQUIRED": true,
+  "VERBOSE": false,
+  "THINKING_FILLER": true,
+
+  "WHISPER_MODEL": "small",
+  "WHISPER_DEVICE": "cpu",
+  "WHISPER_COMPUTE_TYPE": "int8",
+  "WHISPER_LANGUAGE": "ru",
+  "WHISPER_BEAM_SIZE": 1,
+  "WHISPER_VAD_FILTER": true,
+  "WHISPER_INITIAL_PROMPT": "Джарвис, погода, громкость, яркость, скриншот, напоминание, ютуб, стим, вскод, терминал, браузер.",
+
+  "TTS_ENGINE": "auto",
+  "TTS_VOICE": "ru-RU-DmitryNeural",
+  "TTS_RATE": "+10%",
+  "TTS_VOLUME": "+0%",
+  "TTS_PITCH": "+0Hz",
+  "TTS_USE_CACHE": true,
+  "PIPER_SPEED": 1.0,
+  "SAPI_RATE": 185,
+  "SAPI_VOLUME": 1.0,
+
+  "OLLAMA_HOST": "http://127.0.0.1:11434",
+  "OLLAMA_MODEL": "mistral",
+  "OLLAMA_VISION_MODEL": "",
+  "OLLAMA_TIMEOUT": 90,
+  "OLLAMA_MAX_TOKENS": 250,
+  "OLLAMA_TEMPERATURE": 0.6,
+  "OLLAMA_KEEP_ALIVE": "10m",
+  "OLLAMA_RECHECK_SEC": 30,
+  "LLM_HISTORY_SIZE": 8,
+
+  "WEB_SEARCH_RESULTS": 3,
+  "WEATHER_DEFAULT_CITY": "Москва",
+  "WEATHER_DEADLINE": 8.0,
+
+  "WEB_UI_ENABLED": true,
+  "WEB_UI_HOST": "127.0.0.1",
+  "WEB_UI_PORT": 8765,
+  "WEB_UI_OPEN_BROWSER": true,
+
+  "OCR_LANGUAGE": "ru",
+  "PROCESS_TITLE": "Джарвис",
+
+  "_telegram_комментарий": "Без TELEGRAM_ALLOWED_USERS бот не запустится — это защита по умолчанию. Свой числовой ID узнайте у @userinfobot.",
+  "TELEGRAM_ENABLED": false,
+  "TELEGRAM_TOKEN": "",
+  "TELEGRAM_ALLOWED_USERS": [],
+  "TELEGRAM_NOTIFY_ON_START": true,
+
+  "APPS": {
+    "notepad": "notepad.exe",
+    "калькулятор": "calc.exe",
+    "проводник": "explorer.exe",
+    "диспетчер задач": "taskmgr.exe",
+    "paint": "mspaint.exe"
+  }
+}
