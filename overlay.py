@@ -65,6 +65,31 @@ def electron_path() -> Path | None:
     return None
 
 
+def electron_package_installed() -> bool:
+    return (NODE_MODULES / "electron" / "package.json").exists()
+
+
+def _ensure_electron_binary() -> bool:
+    """Докачивает бинарник Electron, если пакет есть, а файла ещё нет.
+
+    `npm install` кладёт только JS-обёртку: сам Electron (~100 МБ) скачивается
+    при первом обращении `require('electron')`. Без этого шага свежий клон
+    выглядел бы как «Electron не установлен».
+    """
+    if electron_path() is not None:
+        return True
+    if not electron_package_installed():
+        return False
+    node = shutil.which("node")
+    if node is None:
+        log("node не найден — не могу скачать бинарник Electron", "error")
+        return False
+    log("Скачиваю бинарник Electron (~100 МБ, только первый раз)", "info")
+    if not _run([node, "-e", "require('electron')"]):
+        return False
+    return electron_path() is not None
+
+
 def node_modules_ready() -> bool:
     return (NODE_MODULES / "electron").exists()
 
@@ -148,7 +173,7 @@ def ensure_built(rebuild: bool = False, install: bool = True) -> bool:
             log("Сборка оверлея не удалась", "error")
             return False
 
-    if electron_path() is None:
+    if not _ensure_electron_binary():
         log("Electron не найден в node_modules — попробуйте удалить desktop/node_modules "
             "и запустить снова", "error")
         return False

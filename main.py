@@ -134,7 +134,13 @@ def run_check() -> int:
         info = overlay.status()
         print(f"  Node.js:   {info['node'] or 'не найден (нужен Node 20+)'}")
         print(f"  npm:       {info['npm'] or 'не найден'}")
-        print(f"  Electron:  {'установлен' if info['electron'] else 'нет (npm install в desktop/)'}")
+        if info["electron"]:
+            electron_text = "установлен"
+        elif info["deps"]:
+            electron_text = "скачается при первом запуске"
+        else:
+            electron_text = "нет (npm install в desktop/)"
+        print(f"  Electron:  {electron_text}")
         print(f"  Сборка:    {'есть' if info['built'] else 'нет'}"
               f"{', устарела' if info['stale'] else ''}")
     except Exception as exc:  # noqa: BLE001
