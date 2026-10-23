@@ -670,6 +670,23 @@ def main() -> int:
     check("подписка на None не ломает",
           quitting.add_shutdown_hook(None) is None, True)
 
+    section("Настольный оверлей (--desktop)")
+    import overlay
+
+    info = overlay.status()
+    check("desktop/ на месте", overlay.DESKTOP_DIR.exists(), True)
+    check("status() отдаёт ключи",
+          set(info) >= {"node", "npm", "electron", "deps", "built", "stale"}, True)
+    check("проверка сборки не падает", isinstance(overlay.needs_rebuild(), bool), True)
+    check("main.py знает флаг --desktop",
+          '"--desktop"' in (config.BASE_DIR / "main.py").read_text("utf-8"), True)
+    # Сборка без исходников бессмысленна: если dist нет, needs_rebuild обязан
+    # вернуть True, иначе оверлей запустится с пустой папкой.
+    check("без сборки needs_rebuild = True",
+          overlay.needs_rebuild() or overlay.is_built(), True)
+    check("путь к Electron не выдумывается",
+          overlay.electron_path() is None or overlay.electron_path().exists(), True)
+
     print("\n" + "=" * 50)
     print(f"Пройдено: {PASSED}   Провалено: {FAILED}")
     print("=" * 50)

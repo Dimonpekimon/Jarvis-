@@ -1,0 +1,53 @@
+# Сборка установщика: npm run dist
+appId: ru.dima.jarvis.desktop
+productName: JarvisOverlay
+copyright: Copyright © 2026 dima
+
+directories:
+  output: release
+  buildResources: assets
+
+# В пакет попадает только собранный код. Исходники TS в установщик не нужны.
+files:
+  - dist/**/*
+  - "!**/*.map"
+  - package.json
+
+# Python-часть ассистента кладём рядом как «сайдкар»: только код, без моделей
+# и личных данных (модели Vosk/Piper докачиваются при первом запуске).
+extraResources:
+  - from: ".."
+    to: "python"
+    filter:
+      - "*.py"
+      - "requirements.txt"
+      - "jarvis_settings.example.json"
+      - "!desktop/**"
+      - "!data/**"
+      - "!outputs/**"
+      - "!web/**"
+      - "!**/__pycache__/**"
+      - "!**/*.log"
+  # Иконки трея и приложения лежат вне asar — main читает их по обычному пути.
+  - from: "assets"
+    to: "assets"
+    filter:
+      - "tray.png"
+      - "icon.png"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icon.png
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Jarvis Overlay
+  deleteAppDataOnUninstall: false

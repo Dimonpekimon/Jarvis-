@@ -1,0 +1,374 @@
+/* ============================================================
+   Оверлей «Джарвис»
+   Фон html/body обязан быть прозрачным: окно Electron прозрачное,
+   и любой непрозрачный фон сразу превратит его в чёрный прямоугольник.
+   ============================================================ */
+
+:root {
+  --panel: rgba(9, 13, 21, 0.74);
+  --panel-dim: rgba(9, 13, 21, 0.45);
+  --border: rgba(122, 190, 255, 0.16);
+  --text: #e9f2ff;
+  --muted: #8ea3bd;
+  --accent: #2ad4ff;
+  --danger: #ff6b8a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* ---------------- каркас ---------------- */
+
+.app {
+  height: 100%;
+  padding: 6px;
+  display: flex;
+}
+
+.card {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow:
+    0 10px 32px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+/* Тонкая неоновая полоска сверху — «включённый» вид. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(42, 212, 255, 0.55), transparent);
+  pointer-events: none;
+}
+
+.card__viz {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  pointer-events: none; /* визуализатор не перехватывает мышь */
+}
+
+.visualizer {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---------------- режимы ---------------- */
+
+/* Компактный вид: всё окно сквозное, кликабельны только кнопки с data-hit. */
+.app--compact .card {
+  pointer-events: none;
+}
+
+.app--dim .card {
+  background: var(--panel-dim);
+  border-color: rgba(122, 190, 255, 0.1);
+}
+
+/* ---------------- кнопка «развернуть» ---------------- */
+
+.expand {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  cursor: pointer;
+  pointer-events: auto; /* единственная кликабельная зона в компакте */
+  opacity: 0.28;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+/* .card в компактном режиме не участвует в hit-testing, поэтому :hover
+   вешаем на .app — он всегда под курсором. */
+.app:hover .expand,
+.expand:focus-visible {
+  opacity: 1;
+}
+
+.expand:hover {
+  color: var(--accent);
+  background: rgba(42, 212, 255, 0.14);
+}
+
+/* ---------------- диалог ---------------- */
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.app--dialog .card__viz {
+  flex: 0 0 92px; /* в диалоге столбики — компактная полоска сверху */
+}
+
+.dialog__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 6px;
+  flex: none;
+}
+
+.drag {
+  -webkit-app-region: drag; /* за шапку окно можно таскать */
+}
+
+.dialog__head button {
+  -webkit-app-region: no-drag;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  transition: background 0.25s ease;
+}
+
+.dialog__state {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+
+.badge--warn {
+  background: rgba(255, 107, 138, 0.16);
+  color: var(--danger);
+}
+
+.dialog__tools {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.tool {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 11px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.tool:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tool--on {
+  color: var(--accent);
+  border-color: rgba(42, 212, 255, 0.35);
+  background: rgba(42, 212, 255, 0.1);
+}
+
+/* ---------------- сообщения ---------------- */
+
+.messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  user-select: text;
+  cursor: text;
+}
+
+.messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.messages::-webkit-scrollbar-thumb {
+  background: rgba(122, 190, 255, 0.22);
+  border-radius: 3px;
+}
+
+.messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.msg {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 8px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+  border-left: 2px solid transparent;
+}
+
+.msg__role {
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.msg__text {
+  font-size: 12.5px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.msg--user {
+  border-left-color: rgba(42, 212, 255, 0.55);
+}
+
+.msg--user .msg__role {
+  color: var(--accent);
+}
+
+.msg--assistant {
+  border-left-color: rgba(143, 123, 255, 0.6);
+}
+
+.msg--assistant .msg__role {
+  color: #a897ff;
+}
+
+.msg--system {
+  border-left-color: rgba(255, 107, 138, 0.5);
+  font-style: italic;
+}
+
+.msg--system .msg__text {
+  color: #c9b3bb;
+}
+
+/* ---------------- ввод ---------------- */
+
+.dialog__foot {
+  flex: none;
+  display: flex;
+  gap: 5px;
+  padding: 8px 10px 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(122, 190, 255, 0.14);
+  border-radius: 9px;
+  outline: none;
+  user-select: text;
+  cursor: text;
+}
+
+.input::placeholder {
+  color: rgba(142, 163, 189, 0.7);
+}
+
+.input:focus {
+  border-color: rgba(42, 212, 255, 0.5);
+  box-shadow: 0 0 0 2px rgba(42, 212, 255, 0.12);
+}
+
+.btn {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.btn:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.btn--primary {
+  color: #041018;
+  background: linear-gradient(180deg, #6fe3ff, #21b7e0);
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.btn--primary:hover:not(:disabled) {
+  color: #041018;
+  background: linear-gradient(180deg, #9beeff, #35c9f0);
+}

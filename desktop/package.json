@@ -1,0 +1,38 @@
+{
+  "name": "jarvis-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Настольный оверлей-интерфейс для голосового ассистента «Джарвис»",
+  "author": "dima",
+  "license": "MIT",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "concurrently -k -n VITE,MAIN,APP -c cyan,yellow,magenta \"vite\" \"npm:watch:main\" \"wait-on tcp:127.0.0.1:5273 && cross-env JARVIS_DEV=1 electron .\"",
+    "watch:main": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
+    "build:main": "tsc -p tsconfig.main.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json",
+    "check:bridge": "electron scripts/check-bridge.js",
+    "check:ui": "electron scripts/check-ui.js",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win",
+    "dist:dir": "npm run build && electron-builder --win --dir"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.0.0",
+    "wait-on": "^8.0.1"
+  }
+}

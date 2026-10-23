@@ -44,7 +44,7 @@ if str(BASE_DIR) not in sys.path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jarvis",
-        description="Джарвис v3.1 — голосовой ассистент для Windows",
+        description="Джарвис v3.2 — голосовой ассистент для Windows",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--mode", choices=["text", "voice", "mixed"],
@@ -61,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="включить Telegram-бота (нужен TELEGRAM_TOKEN)")
     parser.add_argument("--no-ui", action="store_true",
                         help="не поднимать веб-интерфейс с ядром и диалогом")
+    parser.add_argument("--desktop", action="store_true",
+                        help="запустить настольный оверлей (Electron): собирает "
+                             "desktop/ при необходимости и открывает окно поверх "
+                             "рабочего стола")
+    parser.add_argument("--rebuild-desktop", action="store_true",
+                        help="пересобрать оверлей перед запуском")
     parser.add_argument("--ui-port", type=int,
                         help="порт веб-интерфейса (по умолчанию из настроек)")
     parser.add_argument("--no-browser", action="store_true",
@@ -122,6 +128,18 @@ def run_check() -> int:
         print(f"  [ ] Не удалось проверить: {exc}")
     print("-" * 64)
 
+    print("Настольный оверлей (--desktop):")
+    try:
+        import overlay
+        info = overlay.status()
+        print(f"  Node.js:   {info['node'] or 'не найден (нужен Node 20+)'}")
+        print(f"  npm:       {info['npm'] or 'не найден'}")
+        print(f"  Electron:  {'установлен' if info['electron'] else 'нет (npm install в desktop/)'}")
+        print(f"  Сборка:    {'есть' if info['built'] else 'нет'}"
+              f"{', устарела' if info['stale'] else ''}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [ ] Не удалось проверить: {exc}")
+    print("-" * 64)
 
     problems = []
     if not config.FEATURES["vosk"]:
@@ -241,7 +259,14 @@ def main() -> int:
     )
 
     ui = None
-    if not args.no_ui and config.WEB_UI_ENABLED:
+    # Оверлею нужен HTTP-API, поэтому с --desktop веб-интерфейс поднимается всегда.
+    want_ui = (not args.no_ui and config.WEB_UI_ENABLED) or args.desktop
+    if args.desktop and args.no_ui:
+        print("[i] --desktop требует API ядра: --no-ui проигнорирован")
+    if want_ui and not config.WEB_UI_ENABLED:
+        print("[i] WEB_UI_ENABLED выключен в настройках — оверлею некуда подключаться")
+
+    if want_ui and config.WEB_UI_ENABLED:
         from webui import WebUI
 
         ui = WebUI(jarvis, port=args.ui_port,
@@ -249,6 +274,16 @@ def main() -> int:
         ui.start()
         # Команда «выключайся» гасит и ядро, и интерфейс — а не только цикл.
         jarvis.add_shutdown_hook(ui.stop)
+
+    if args.desktop:
+        # Сборка и запуск окна: Python остаётся мозгом, Electron — только UI.
+        import overlay
+
+        process = overlay.run(ui.url if ui is not None else "", rebuild=args.rebuild_desktop)
+        if process is not None:
+            jarvis.add_shutdown_hook(process.stop)
+        else:
+            print("[!] Оверлей не запустился — работаю как обычно, через браузер")
 
     try:
         jarvis.run()
