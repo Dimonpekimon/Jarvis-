@@ -82,12 +82,14 @@ export interface PythonCommand {
   command: string;
   /** Флаги самого интерпретатора, например ["-3"] у лаунчера py. */
   prefix: string[];
-  /** Аргументы приложения: main.py --no-browser ... */
+  /** Аргументы приложения: main.py --no-desktop ... */
   args: string[];
 }
 
 function pythonArgs(): string[] {
-  const args = ["main.py", "--no-browser", "--ui-port", String(apiPort())];
+  // Окно запускает ядро без своего же окна: --no-desktop. API поднимается на
+  // том же порту, по которому к нему подключится этот Electron.
+  const args = ["main.py", "--no-desktop", "--api-port", String(apiPort())];
   const extra = (process.env.JARVIS_PYTHON_ARGS ?? "").trim();
   if (extra) args.push(...extra.split(/\s+/));
   return args;

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Конфигурация Джарвиса v3.2.
+"""Конфигурация Джарвиса v3.3.
 
 Все параметры ниже можно переопределить в файле ``jarvis_settings.json``
 (он создаётся автоматически при первом запуске рядом с этим модулем).
@@ -26,6 +26,10 @@ from pathlib import Path
 # Заставляем его копировать файлы вместо ссылок.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+# Версия приложения. Одна на всё: заголовок в логе, API, диагностика.
+# __init__.__version__ держим в том же виде — selftest сверяет их.
+APP_VERSION = "3.3.0"
 
 # =====================================================================
 #  ПУТИ
@@ -173,12 +177,12 @@ TELEGRAM_ALLOWED_USERS: list = []   # [] = разрешить всем
 TELEGRAM_NOTIFY_ON_START = True
 
 # =====================================================================
-#  ВЕБ-ИНТЕРФЕЙС (ядро и диалог в браузере)
+#  API ЯДРА (канал связи с настольным окном)
 # =====================================================================
-WEB_UI_ENABLED = True               # поднимать интерфейс вместе с ассистентом
-WEB_UI_HOST = "127.0.0.1"           # слушаем только локально
-WEB_UI_PORT = 8765                  # если порт занят, берётся следующий свободный
-WEB_UI_OPEN_BROWSER = True          # открывать браузер при старте
+# Отдельной веб-версии нет: страницу рисует Electron (desktop/), а Python
+# отдаёт ему состояние и принимает реплики по HTTP/SSE на петлевом адресе.
+API_HOST = "127.0.0.1"              # слушаем только локально
+API_PORT = 8765                     # если порт занят, берётся следующий свободный
 
 # =====================================================================
 #  ВИДЕНИЕ (скриншот + анализ)
@@ -241,7 +245,7 @@ _TUNABLE = [
     "LLM_HISTORY_SIZE", "LLM_SYSTEM_PROMPT",
     "WEB_SEARCH_RESULTS", "LLM_OFFLINE_WEB_FALLBACK", "WEATHER_DEFAULT_CITY", "WEATHER_DEADLINE",
     "OCR_LANGUAGE", "SCREENSHOT_DIR", "COMMANDS_FILE", "PROCESS_TITLE",
-    "WEB_UI_ENABLED", "WEB_UI_HOST", "WEB_UI_PORT", "WEB_UI_OPEN_BROWSER",
+    "API_HOST", "API_PORT",
     "TELEGRAM_ENABLED", "TELEGRAM_TOKEN", "TELEGRAM_ALLOWED_USERS",
     "TELEGRAM_NOTIFY_ON_START", "APPS",
 ]
@@ -259,6 +263,14 @@ def _load_settings() -> dict:
             data = json.load(f)
         if not isinstance(data, dict):
             return {}
+        # Совместимость: до v3.3 настройки назывались WEB_UI_*. Переносим порт
+        # и хост, чтобы у пользователя не сбросилось выбранное значение.
+        if "API_PORT" not in data and isinstance(data.get("WEB_UI_PORT"), int):
+            data["API_PORT"] = data["WEB_UI_PORT"]
+        if "API_HOST" not in data and isinstance(data.get("WEB_UI_HOST"), str):
+            data["API_HOST"] = data["WEB_UI_HOST"]
+        for legacy in ("WEB_UI_ENABLED", "WEB_UI_OPEN_BROWSER"):
+            data.pop(legacy, None)
         return data
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[config] Не удалось прочитать {SETTINGS_FILE.name}: {exc}")

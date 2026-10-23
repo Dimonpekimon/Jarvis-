@@ -3,20 +3,25 @@
 
 Примеры запуска::
 
-    python main.py                 # смешанный режим (голос + текст)
+    python main.py                 # настольное окно + голос и текст
     python main.py --text          # только текст
     python main.py --voice         # только голос
     python main.py --no-tts        # без озвучки
     python main.py --no-wake       # голос без слова-активатора «Джарвис»
+    python main.py --no-desktop    # без окна: консоль, голос, API ядра
     python main.py --check         # диагностика окружения
-    python main.py --list-voices   # доступные голоса edge-tts
+    python main.py --list-voices   # доступные голоса
     python main.py --background    # фоновый запуск без консоли
+
+Интерфейс — только настольное окно (``desktop/``, Electron). Веб-версии в
+браузере нет: Python поднимает API ядра на петлевом адресе, окно рисует
+диалог и визуализатор и общается с ядром по HTTP/SSE.
 
 Фоновый запуск (ярлык «Джарвис» на рабочем столе):
     ярлык запускает ``Джарвис.exe main.py --background`` — это копия
     ``pythonw.exe`` рядом с проектом. Консоли нет, поэтому текстовый ввод не
     спрашивается, лог пишется в ``data/jarvis.log``, а управление идёт голосом
-    и через веб-интерфейс (он же открывается браузером).
+    и через настольное окно.
 
     Копия под именем «Джарвис.exe» нужна ради диспетчера задач: он показывает
     имя файла, а не заголовок окна, поэтому обычный ``pythonw.exe`` выглядел бы
@@ -42,9 +47,11 @@ if str(BASE_DIR) not in sys.path:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    import config
+
     parser = argparse.ArgumentParser(
         prog="jarvis",
-        description="Джарвис v3.2 — голосовой ассистент для Windows",
+        description=f"Джарвис v{config.APP_VERSION} — голосовой ассистент для Windows",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--mode", choices=["text", "voice", "mixed"],
@@ -59,21 +66,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--voice-name", help="голос edge-tts, например ru-RU-SvetlanaNeural")
     parser.add_argument("--telegram", action="store_true",
                         help="включить Telegram-бота (нужен TELEGRAM_TOKEN)")
-    parser.add_argument("--no-ui", action="store_true",
-                        help="не поднимать веб-интерфейс с ядром и диалогом")
-    parser.add_argument("--desktop", action="store_true",
-                        help="запустить настольный оверлей (Electron): собирает "
-                             "desktop/ при необходимости и открывает окно поверх "
-                             "рабочего стола")
+    parser.add_argument("--no-desktop", action="store_true",
+                        help="не запускать настольное окно (консоль и голос)")
     parser.add_argument("--rebuild-desktop", action="store_true",
-                        help="пересобрать оверлей перед запуском")
-    parser.add_argument("--ui-port", type=int,
-                        help="порт веб-интерфейса (по умолчанию из настроек)")
-    parser.add_argument("--no-browser", action="store_true",
-                        help="не открывать браузер при старте интерфейса")
+                        help="пересобрать окно перед запуском")
+    parser.add_argument("--api-port", type=int,
+                        help="порт API ядра (по умолчанию из настроек)")
     parser.add_argument("--background", action="store_true",
                         help="фоновый запуск без консоли (режим ярлыка на рабочем "
-                             "столе): лог в файл, управление голосом и через интерфейс")
+                             "столе): лог в файл, управление голосом и через окно")
+    # Скрытые синонимы прежней веб-версии: старые ярлыки и скрипты не должны
+    # падать с «unrecognized arguments».
+    parser.add_argument("--desktop", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-ui", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--ui-port", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--verbose", action="store_true", help="подробный лог")
     parser.add_argument("--check", action="store_true", help="проверить окружение и выйти")
     parser.add_argument("--list-voices", action="store_true",
@@ -117,6 +124,7 @@ def run_check() -> int:
     print(f"  Голос Piper:        {'да' if piper_ready else 'нет, скачается при запуске'}")
     print(f"  Нейросеть:          {config.GEMINI_MODEL} (Gemini API)")
     print(f"  Telegram:           {'включён' if config.TELEGRAM_ENABLED else 'выключен'}")
+    print(f"  API ядра:           {config.API_HOST}:{config.API_PORT}")
     print("-" * 64)
 
     print("Gemini (мозг):")
@@ -128,7 +136,7 @@ def run_check() -> int:
         print(f"  [ ] Не удалось проверить: {exc}")
     print("-" * 64)
 
-    print("Настольный оверлей (--desktop):")
+    print("Настольное окно (запускается по умолчанию):")
     try:
         import overlay
         info = overlay.status()
@@ -265,31 +273,31 @@ def main() -> int:
     )
 
     ui = None
-    # Оверлею нужен HTTP-API, поэтому с --desktop веб-интерфейс поднимается всегда.
-    want_ui = (not args.no_ui and config.WEB_UI_ENABLED) or args.desktop
-    if args.desktop and args.no_ui:
-        print("[i] --desktop требует API ядра: --no-ui проигнорирован")
-    if want_ui and not config.WEB_UI_ENABLED:
-        print("[i] WEB_UI_ENABLED выключен в настройках — оверлею некуда подключаться")
+    # Веб-версии больше нет: интерфейс — настольное окно. Ядру всё равно нужен
+    # HTTP/SSE-канал, поэтому API поднимается всегда, даже без окна.
+    from api import CoreAPI
 
-    if want_ui and config.WEB_UI_ENABLED:
-        from webui import WebUI
+    api_port = args.api_port if args.api_port is not None else args.ui_port
+    ui = CoreAPI(jarvis, port=api_port)
+    if not ui.start():
+        print("[!] Не удалось поднять API ядра — окно не сможет подключиться")
+    # Команда «выключайся» гасит и ядро, и API, и окно — а не только цикл.
+    jarvis.add_shutdown_hook(ui.stop)
 
-        ui = WebUI(jarvis, port=args.ui_port,
-                   open_browser=config.WEB_UI_OPEN_BROWSER and not args.no_browser)
-        ui.start()
-        # Команда «выключайся» гасит и ядро, и интерфейс — а не только цикл.
-        jarvis.add_shutdown_hook(ui.stop)
-
-    if args.desktop:
+    no_desktop = args.no_desktop or args.no_ui
+    if no_desktop:
+        if ui.running:
+            print(f"[i] Окно отключено (--no-desktop). API ядра: {ui.url}")
+    else:
         # Сборка и запуск окна: Python остаётся мозгом, Electron — только UI.
         import overlay
 
-        process = overlay.run(ui.url if ui is not None else "", rebuild=args.rebuild_desktop)
+        process = overlay.run(ui.url if ui.running else "", rebuild=args.rebuild_desktop)
         if process is not None:
             jarvis.add_shutdown_hook(process.stop)
         else:
-            print("[!] Оверлей не запустился — работаю как обычно, через браузер")
+            print("[!] Окно не запустилось — работаю в консоли.")
+            print("    Проверьте окружение: python main.py --check")
 
     try:
         jarvis.run()

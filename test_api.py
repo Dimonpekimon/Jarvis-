@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Тесты веб-интерфейса Джарвиса.
+"""Тесты API ядра Джарвиса (единственный канал связи с настольным окном).
 
 Поднимают настоящий HTTP-сервер на 127.0.0.1 с эфемерным портом и бьют по нему
 реальными запросами. Ядро подменено заглушкой: никаких команд ОС, звука и сети,
@@ -15,7 +15,7 @@
 * ``stop``/``start`` завершаются конечно и повторно;
 * правка ответа озвучивается с ``publish=False`` (без дубля реплики).
 
-Запуск: ``python test_webui.py`` (или ``python -m unittest test_webui``).
+Запуск: ``python test_api.py`` (или ``python -m unittest test_api``).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import threading
 import time
 import unittest
 
-import webui
+import api
 
 
 # =====================================================================
@@ -167,12 +167,12 @@ def status_of(raw: bytes) -> int:
 # =====================================================================
 #  БАЗА
 # =====================================================================
-class WebUITestCase(unittest.TestCase):
+class ApiTestCase(unittest.TestCase):
     def setUp(self):
         self._uis = []
         # Лог интерфейса в тестах не нужен — глушим, чтобы вывод был чистым.
-        self._real_log = webui.log
-        webui.log = lambda *args, **kwargs: None
+        self._real_log = api.log
+        api.log = lambda *args, **kwargs: None
 
     def tearDown(self):
         for ui in self._uis:
@@ -180,13 +180,12 @@ class WebUITestCase(unittest.TestCase):
                 ui.stop()
             except Exception:  # noqa: BLE001
                 pass
-        webui.log = self._real_log
+        api.log = self._real_log
 
     def start_ui(self, jarvis=None, **kwargs):
         jarvis = jarvis if jarvis is not None else DummyJarvis()
         kwargs.setdefault("port", 0)
-        kwargs.setdefault("open_browser", False)
-        ui = webui.WebUI(jarvis, **kwargs)
+        ui = api.CoreAPI(jarvis, **kwargs)
         self.assertTrue(ui.start(), "сервер не поднялся")
         self._uis.append(ui)
         return ui, jarvis
@@ -199,7 +198,7 @@ class WebUITestCase(unittest.TestCase):
 # =====================================================================
 #  БАЗОВОЕ
 # =====================================================================
-class TestBasics(WebUITestCase):
+class TestBasics(ApiTestCase):
     def test_ephemeral_port_and_health(self):
         ui, _ = self.start_ui()
         self.assertGreater(ui.port, 0, "порт=0 должен занять эфемерный порт")
@@ -215,11 +214,18 @@ class TestBasics(WebUITestCase):
         status, _ = http_call(ui.port, "GET", "/api/health")
         self.assertEqual(status, 200)
 
-    def test_index_served(self):
+    def test_root_serves_json_not_html(self):
+        # Страницы в браузере больше нет: корень отдаёт только сведения.
         ui, _ = self.start_ui()
         status, body = http_call(ui.port, "GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn(b"<", body)
+        self.assertEqual(json.loads(body)["ui"], "desktop")
+        self.assertNotIn(b"<html", body.lower())
+
+    def test_unknown_static_path_is_404(self):
+        ui, _ = self.start_ui()
+        status, _ = http_call(ui.port, "GET", "/index.html")
+        self.assertEqual(status, 404)
 
     def test_stop_is_idempotent(self):
         ui, _ = self.start_ui()
@@ -231,7 +237,7 @@ class TestBasics(WebUITestCase):
 # =====================================================================
 #  HOST / ORIGIN / SEC-FETCH-SITE
 # =====================================================================
-class TestOriginGuards(WebUITestCase):
+class TestOriginGuards(ApiTestCase):
     def test_same_origin_accepted(self):
         ui, _ = self.start_ui()
         origin = f"http://127.0.0.1:{ui.port}"
@@ -287,7 +293,7 @@ class TestOriginGuards(WebUITestCase):
 # =====================================================================
 #  ТЕЛО ЗАПРОСА
 # =====================================================================
-class TestBodyValidation(WebUITestCase):
+class TestBodyValidation(ApiTestCase):
     def test_content_type_required(self):
         ui, jarvis = self.start_ui()
         status, _ = self.post(ui, "/api/message", '{"text": "x"}',
@@ -319,7 +325,7 @@ class TestBodyValidation(WebUITestCase):
 
     def test_text_too_long_rejected(self):
         ui, jarvis = self.start_ui()
-        status, _ = self.post(ui, "/api/message", {"text": "x" * (webui.MAX_TEXT + 1)})
+        status, _ = self.post(ui, "/api/message", {"text": "x" * (api.MAX_TEXT + 1)})
         self.assertEqual(status, 413)
         self.assertEqual(jarvis.processed, [])
 
@@ -348,7 +354,7 @@ class TestBodyValidation(WebUITestCase):
                                   "Content-Length: -5"], body=b"", host=host)
         self.assertEqual(status_of(raw_exchange(ui.port, raw)), 400)
 
-        too_big = webui.MAX_BODY + 1
+        too_big = api.MAX_BODY + 1
         raw = build_raw(ui.port, ["Content-Type: application/json",
                                   f"Content-Length: {too_big}"], body=b"{}", host=host)
         self.assertEqual(status_of(raw_exchange(ui.port, raw)), 413)
@@ -373,7 +379,7 @@ class TestBodyValidation(WebUITestCase):
 # =====================================================================
 #  FIFO-ДИСПЕТЧЕР
 # =====================================================================
-class TestDispatcher(WebUITestCase):
+class TestDispatcher(ApiTestCase):
     def test_fifo_and_single_worker(self):
         gate = threading.Event()
         jarvis = DummyJarvis(gate=gate)
@@ -448,7 +454,7 @@ class TestDispatcher(WebUITestCase):
 # =====================================================================
 #  ОЗВУЧКА ПРАВКИ
 # =====================================================================
-class TestSpeak(WebUITestCase):
+class TestSpeak(ApiTestCase):
     def test_speak_uses_publish_false(self):
         ui, jarvis = self.start_ui()
         status, _ = self.post(ui, "/api/speak", {"text": "исправленный ответ"})
@@ -465,19 +471,21 @@ class TestSpeak(WebUITestCase):
 # =====================================================================
 #  СОВМЕСТИМОСТЬ
 # =====================================================================
-class TestLegacyApi(WebUITestCase):
+class TestLegacyApi(ApiTestCase):
     def test_submit_message_without_dispatcher(self):
         jarvis = DummyJarvis()
-        accepted = webui.submit_message(jarvis, "старый вызов")
+        accepted = api.submit_message(jarvis, "старый вызов")
         self.assertTrue(accepted)
         self.assertTrue(wait_for(lambda: jarvis.processed == ["старый вызов"]))
-        dispatcher = webui._legacy_dispatchers.get(id(jarvis))
+        dispatcher = api._legacy_dispatchers.get(id(jarvis))
         if dispatcher is not None:
             dispatcher.stop()
 
-    def test_resolve_static_unchanged(self):
-        self.assertEqual(webui.resolve_static("/").name, "index.html")
-        self.assertIsNone(webui.resolve_static("/../config.py"))
+    def test_api_version_reported(self):
+        ui, _ = self.start_ui()
+        status, body = http_call(ui.port, "GET", "/api/health")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["version"], api.VERSION)
 
 
 if __name__ == "__main__":

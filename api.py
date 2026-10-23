@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Веб-интерфейс Джарвиса: ядро и диалог в браузере.
+"""API ядра Джарвиса — единственный канал между Python и настольным окном.
 
-Поднимает крошечный HTTP-сервер на localhost и отдаёт страницу
-``web/index.html``. Состояние ассистента уходит в браузер через Server-Sent
-Events, текст из интерфейса возвращается в ядро. Используется только
-стандартная библиотека — никаких новых зависимостей, и наружу ничего не уходит.
+Веб-интерфейса в браузере больше нет: страницу рисует Electron
+(``desktop/``). Python поднимает крошечный HTTP-сервер на localhost, отдаёт
+состояние через Server-Sent Events и принимает реплики из окна. Используется
+только стандартная библиотека — никаких новых зависимостей, наружу ничего
+не уходит.
 
 Безопасность. Сервер слушает только петлевой адрес (127.0.0.1/localhost),
 никаких ``0.0.0.0``. Каждый запрос сверяется с реально занятым портом:
@@ -22,8 +23,8 @@ Events, текст из интерфейса возвращается в ядр�
 Адреса:
 
 ===========================  ===============================================
-``GET  /``                   страница интерфейса
-``GET  /api/health``         сервер жив? (по нему интерфейс отличает демо-режим)
+``GET  /``                   сведения о сервере (HTML не отдаётся)
+``GET  /api/health``         сервер жив? (по нему окно отличает демо-режим)
 ``GET  /api/state``          текущее состояние и статус систем
 ``GET  /api/stream``         поток событий (SSE)
 ``POST /api/message``        ``{"text": "..."}`` — реплика пользователя
@@ -32,20 +33,18 @@ Events, текст из интерфейса возвращается в ядр�
 ``POST /api/reset``          очистить историю диалога
 ===========================  ===============================================
 
-Запуск только интерфейса (без микрофона): ``python webui.py``.
+Поднимается из ``main.py``; отдельного запуска у модуля нет — без ядра
+серверу нечего показывать.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import queue
 import socket
 import sys
 import threading
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import config
@@ -53,8 +52,8 @@ import events
 from events import bus, emit_message, emit_state
 from utils import log
 
-WEB_DIR = Path(config.BASE_DIR) / "web"
-INDEX_FILE = WEB_DIR / "index.html"
+# Версия API в том же формате, что и раньше: «major.minor».
+VERSION = ".".join(config.APP_VERSION.split(".")[:2])
 
 MAX_BODY = 64 * 1024        # больше этого от интерфейса прийти не может
 MAX_TEXT = 4 * 1024         # предел длины одной реплики
@@ -67,37 +66,9 @@ STOP_TIMEOUT = 2.0          # сколько ждать FIFO-диспетчер 
 # Единственные имена, которые сервер считает «своими». Никаких масок.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
 
-_MIME = {
-    ".html": "text/html; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".js": "application/javascript; charset=utf-8",
-    ".svg": "image/svg+xml",
-    ".json": "application/json; charset=utf-8",
-    ".png": "image/png",
-    ".ico": "image/x-icon",
-    ".woff2": "font/woff2",
-}
-
-
 # =====================================================================
 #  ВСПОМОГАТЕЛЬНОЕ
 # =====================================================================
-def resolve_static(request_path: str):
-    """Отдаёт файл из ``web/``, не выпуская запрос за пределы папки.
-
-    Возвращает ``Path`` или ``None``. Проверка через ``relative_to`` нужна,
-    чтобы запрос вида ``/../../config.py`` не ушёл наружу.
-    """
-    relative = (request_path or "").split("?", 1)[0].lstrip("/") or "index.html"
-    root = WEB_DIR.resolve()
-    try:
-        candidate = (root / relative).resolve()
-        candidate.relative_to(root)
-    except (OSError, ValueError):
-        return None
-    return candidate if candidate.is_file() else None
-
-
 def safe_status(jarvis) -> str:
     """Статус систем — интерфейс не должен падать из-за проблем в ядре."""
     try:
@@ -206,7 +177,7 @@ class Dispatcher:
             stop = threading.Event()
             self._stop = stop
             self._thread = threading.Thread(
-                target=self._run, args=(stop,), name="webui-dispatch", daemon=True)
+                target=self._run, args=(stop,), name="core-api-dispatch", daemon=True)
             self._thread.start()
 
     def submit_message(self, text: str) -> bool:
@@ -303,6 +274,20 @@ class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+    def handle_error(self, request, client_address) -> None:
+        """Обрыв соединения клиентом — норма, а не авария.
+
+        Окно закрыли, SSE переподключился, Electron убит вместе с ядром — во
+        всех этих случаях socketserver печатал бы полный traceback в консоль.
+        Логируем коротко, остальные ошибки отдаём стандартному обработчику.
+        """
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionResetError, ConnectionAbortedError,
+                              BrokenPipeError)):
+            log(f"Клиент отключился: {client_address[0]}", "debug")
+            return
+        super().handle_error(request, client_address)
+
 
 def _make_handler(jarvis, dispatcher: Dispatcher):
     """Собирает класс обработчика, замкнутый на ассистента и диспетчер."""
@@ -311,11 +296,11 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
         # HTTP/1.0 + явный Content-Length: тело заканчивается концом соединения,
         # поэтому SSE-поток работает без возни с chunked-кодированием.
         protocol_version = "HTTP/1.0"
-        server_version = "JarvisUI/3.2"
+        server_version = f"JarvisCore/{VERSION}"
         timeout = READ_TIMEOUT  # предел ожидания запроса и тела от клиента
 
         def log_message(self, fmt, *args):  # noqa: A003
-            log(f"[ui] {fmt % args}", "debug")
+            log(f"[api] {fmt % args}", "debug")
 
         # ---------------- ответы ----------------
         def _send(self, body: bytes, content_type: str, status: int = 200) -> None:
@@ -360,7 +345,7 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
             reason = self._local_request_reason()
             if reason is None:
                 return True
-            log(f"[ui] запрос отклонён: {reason}", "warn")
+            log(f"[api] запрос отклонён: {reason}", "warn")
             self._json({"ok": False, "error": "forbidden"}, 403)
             return False
 
@@ -428,7 +413,8 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
                 return
             path = self.path.split("?", 1)[0]
             if path == "/api/health":
-                self._json({"ok": True, "app": "jarvis", "version": "3.2"})
+                self._json({"ok": True, "app": "jarvis", "version": VERSION,
+                            "ui": "desktop"})
                 return
             if path == "/api/state":
                 self._json({"ok": True, "state": events.current_state(),
@@ -440,17 +426,12 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
             if path == "/favicon.ico":
                 self._send(b"", "image/x-icon", 204)
                 return
-            target = resolve_static(self.path)
-            if target is None:
-                self._json({"ok": False, "error": "not found"}, 404)
+            if path == "/":
+                # Страницы здесь нет: интерфейс — отдельное приложение Electron.
+                self._json({"ok": True, "app": "jarvis", "ui": "desktop",
+                            "version": VERSION})
                 return
-            try:
-                body = target.read_bytes()
-            except OSError as exc:
-                log(f"Не удалось прочитать {target.name}: {exc}", "warn")
-                self._json({"ok": False, "error": "read error"}, 500)
-                return
-            self._send(body, _MIME.get(target.suffix.lower(), "application/octet-stream"))
+            self._json({"ok": False, "error": "not found"}, 404)
 
         # ---------------- SSE ----------------
         def _stream(self) -> None:
@@ -473,7 +454,7 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
                         continue
                     self._event(event)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
-                pass  # браузер закрыл вкладку — это норма
+                pass  # окно закрыло поток — это норма
             finally:
                 bus.unsubscribe(channel)
 
@@ -534,15 +515,14 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
 # =====================================================================
 #  ЗАПУСК
 # =====================================================================
-class WebUI:
-    """HTTP-сервер интерфейса. Работает в отдельном потоке."""
+class CoreAPI:
+    """HTTP/SSE-сервер ядра. Работает в отдельном потоке."""
 
     def __init__(self, jarvis, host: str | None = None, port: int | None = None,
-                 open_browser: bool = True, queue_size: int = QUEUE_MAX):
+                 queue_size: int = QUEUE_MAX):
         self.jarvis = jarvis
-        self.host = normalize_host(host if host is not None else config.WEB_UI_HOST)
-        self.port = int(port if port is not None else config.WEB_UI_PORT)
-        self.open_browser = open_browser
+        self.host = normalize_host(host if host is not None else config.API_HOST)
+        self.port = int(port if port is not None else config.API_PORT)
         self.url = ""
         self.dispatcher = Dispatcher(jarvis, maxsize=queue_size)
         self._server: _Server | None = None
@@ -567,16 +547,13 @@ class WebUI:
             self._server = server
             self.port = int(server.server_address[1])
             return True
-        log(f"Не удалось занять порт для интерфейса: {last_error}", "warn")
+        log(f"Не удалось занять порт для API: {last_error}", "warn")
         return False
 
     def start(self) -> bool:
-        """Поднимает сервер. False — интерфейс недоступен, ассистент работает."""
+        """Поднимает сервер. False — окну некуда подключаться, ядро работает."""
         if self._server is not None:
             return True
-        if not INDEX_FILE.exists():
-            log(f"Нет файла интерфейса: {INDEX_FILE}", "warn")
-            return False
 
         handler = _make_handler(self.jarvis, self.dispatcher)
         if not self._bind(handler):
@@ -585,18 +562,10 @@ class WebUI:
         self.dispatcher.start()
         self.url = f"http://{self.host}:{self.port}/"
         self._thread = threading.Thread(target=self._server.serve_forever,
-                                        name="webui", daemon=True)
+                                        name="core-api", daemon=True)
         self._thread.start()
-        log(f"Интерфейс Джарвиса: {self.url}", "info")
-        if self.open_browser:
-            threading.Timer(0.8, self._open).start()
+        log(f"API ядра: {self.url}", "info")
         return True
-
-    def _open(self) -> None:
-        try:
-            webbrowser.open(self.url)
-        except Exception as exc:  # noqa: BLE001
-            log(f"Не удалось открыть браузер: {exc}", "debug")
 
     def stop(self) -> None:
         """Гасит сервер и диспетчер. Безопасно при повторном вызове."""
@@ -606,47 +575,5 @@ class WebUI:
                 server.shutdown()
                 server.server_close()
             except Exception as exc:  # noqa: BLE001
-                log(f"Остановка интерфейса: {exc}", "debug")
+                log(f"Остановка API: {exc}", "debug")
         self.dispatcher.stop()
-
-
-def _stdin_available() -> bool:
-    """Есть ли консоль для текстового ввода (нет — значит фоновый запуск)."""
-    try:
-        return sys.stdin is not None and sys.stdin.readable()
-    except (ValueError, AttributeError):
-        return False
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        prog="jarvis-ui",
-        description="Веб-интерфейс Джарвиса: ядро и диалог в браузере",
-    )
-    parser.add_argument("--port", type=int, help="порт (по умолчанию из настроек)")
-    parser.add_argument("--no-browser", action="store_true", help="не открывать браузер")
-    parser.add_argument("--no-tts", action="store_true", help="без озвучки")
-    args = parser.parse_args()
-
-    from jarvis_core import Jarvis
-
-    # Без консоли (pythonw/ярлык) текстовый ввод невозможен — работаем как фоновый:
-    # управление идёт через веб-интерфейс, а не через пустой input().
-    background = not _stdin_available()
-    jarvis = Jarvis(mode="text", enable_tts=not args.no_tts, background=background)
-    ui = WebUI(jarvis, port=args.port, open_browser=not args.no_browser)
-    if not ui.start():
-        return 1
-    # Команда «выключайся» (голосом или из интерфейса) должна погасить и сервер.
-    jarvis.add_shutdown_hook(ui.stop)
-    try:
-        jarvis.run()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        ui.stop()
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

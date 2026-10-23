@@ -25,7 +25,7 @@ import make_commands_list
 import make_shortcut
 import speech
 import tts
-import webui
+import api
 from actions import (
     _city_alias,
     _city_candidates,
@@ -59,7 +59,7 @@ def section(title: str) -> None:
 
 
 def main() -> int:
-    print("Проверка Джарвиса v3.1")
+    print(f"Проверка Джарвиса v{config.APP_VERSION}")
 
     # ---------------- Калькулятор ----------------
     section("Калькулятор (главный исправленный баг)")
@@ -610,16 +610,21 @@ def main() -> int:
     check("после отписки событий нет", channel.empty(), True)
     check("состояние помнится и без подписчиков", events.current_state(), "idle")
 
-    # ---------------- Интерфейс: раздача файлов ----------------
-    section("Интерфейс: раздача файлов")
-    check("страница интерфейса есть", webui.INDEX_FILE.exists(), True)
-    check("корень отдаёт index.html", webui.resolve_static("/").name, "index.html")
-    check("выход из папки заблокирован", webui.resolve_static("/../config.py"), None)
-    check("выход в системную папку заблокирован",
-          webui.resolve_static("/../../Windows/win.ini"), None)
-    check("неизвестный файл", webui.resolve_static("/nope.html"), None)
-    check("интерфейс включён по умолчанию", config.WEB_UI_ENABLED, True)
-    check("порт интерфейса задан", isinstance(config.WEB_UI_PORT, int), True)
+    # ---------------- API ядра: единственный канал окна ----------------
+    section("API ядра (канал настольного окна)")
+    # Веб-версии больше нет: страницу рисует Electron, а Python отдаёт только API.
+    check("веб-страницы в проекте нет", (config.BASE_DIR / "web").exists(), False)
+    check("адрес API локальный",
+          config.API_HOST in ("127.0.0.1", "localhost"), True)
+    check("порт API задан",
+          isinstance(config.API_PORT, int) and config.API_PORT > 0, True)
+    check("класс API на месте", callable(api.CoreAPI), True)
+    check("версия API объявлена",
+          isinstance(api.VERSION, str) and api.VERSION.count(".") == 1, True)
+    check("нет раздачи статики",
+          hasattr(api, "resolve_static") or hasattr(api, "INDEX_FILE"), False)
+    check("main.py знает флаг --no-desktop",
+          '"--no-desktop"' in (config.BASE_DIR / "main.py").read_text("utf-8"), True)
     check("состояния интерфейса перечислены",
           sorted([events.STATE_IDLE, events.STATE_LISTENING, events.STATE_THINKING,
                   events.STATE_SPEAKING, events.STATE_LOADING]),
@@ -632,6 +637,9 @@ def main() -> int:
     check("numpy доступен", config.FEATURES["numpy"], True)
     check("Vosk доступен", config.FEATURES["vosk"], True)
     check("edge-tts доступен", config.FEATURES["edge_tts"], True)
+    check("версия совпадает с __init__.py",
+          f'__version__ = "{config.APP_VERSION}"' in
+          (config.BASE_DIR / "__init__.py").read_text("utf-8"), True)
     check("мозг настроен на Gemini", config.GEMINI_MODEL.startswith("gemini"), True)
     check("поле ключа Gemini задано", isinstance(config.GEMINI_API_KEY, str), True)
     check("есть запасная модель", bool(config.GEMINI_FALLBACK_MODELS), True)
