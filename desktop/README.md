@@ -277,7 +277,8 @@ canvas имеет ненулевой размер, в компакте карт�
 | Симптом | Причина и лечение |
 |---|---|
 | `TypeError: Cannot read properties of undefined (reading 'isPackaged')` | в окружении стоит `ELECTRON_RUN_AS_NODE=1` — electron работает как обычный Node. Запускайте без этой переменной. |
-| `GPU process exited unexpectedly` → `GPU process isn't usable. Goodbye.` | драйвер/виртуалка не даёт GL-контекст. Запустите с `--disable-gpu` или `--no-sandbox --disable-gpu-sandbox`; приложение само перезапустится с `--disable-gpu` после первого падения renderer-а. |
+| `GPU process exited unexpectedly` → `GPU process isn't usable. Goodbye.` | драйвер или инжект в GPU-процесс (антивирус, оверлей) не даёт создать контекст. Помогает `--disable-gpu-sandbox`; `--disable-gpu` сам по себе — нет, GPU-процесс всё равно стартует и падает. `overlay.py` теперь сам ловит такой выход и перезапускает окно с этим флагом, запоминая его в `data/overlay_flags.json`. |
+| окно не появляется вовсе, в `data/jarvis.log`: `npm не найден` | раньше это блокировало запуск, даже когда `dist/` и `electron.exe` уже были. Сейчас npm нужен только для `npm install` / `npm run build`; для пересборки поставьте Node.js 20+ (или задайте `JARVIS_NODE`). |
 | `Unable to load preload script: module not found: ../shared/ipc` | preload обязан работать с `sandbox: false` — в песочнице локальный `require` недоступен. В `main.ts` это уже выставлено. |
 | «ядро не на связи», в логе `ModuleNotFoundError: No module named 'requests'` | `python` из PATH — не тот интерпретатор. Укажите `JARVIS_PYTHON=...\Python314\python.exe` или создайте `.venv` в проекте. |
 | окно есть, но клики проходят насквозь всегда | проверьте, что в разметке есть `data-hit`, а `pointer-events` у нужного элемента не `none`. |

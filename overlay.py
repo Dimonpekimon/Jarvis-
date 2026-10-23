@@ -13,12 +13,15 @@ Python остаётся мозгом и голосом: он поднимает 
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
+from typing import Iterator
 
 import config
 from utils import log
@@ -32,12 +35,89 @@ NODE_MODULES = DESKTOP_DIR / "node_modules"
 SOURCE_SUFFIXES = {".ts", ".tsx", ".css", ".html", ".mts"}
 SOURCE_DIRS = ("src", "scripts")
 
+NODE_EXE = "node.exe" if os.name == "nt" else "node"
+NPM_NAMES = ("npm.cmd", "npm.bat", "npm.exe", "npm") if os.name == "nt" else ("npm",)
 
-# --------------------------------------------------------------------- проверки
+
+# ------------------------------------------------------------ поиск Node.js
+#
+# PATH — не единственный источник: установщик Node прописывает
+# C:\Program Files\nodejs в системный PATH, и если папку потом удалили
+# (обновление, «чистильщик», антивирус), npm «исчезает» при живом реестре.
+# Поэтому дополнительно смотрим стандартные места установки и менеджеры версий.
+
+def _env_path(name: str) -> Path | None:
+    value = os.environ.get(name)
+    return Path(value) if value else None
+
+
+def _node_install_dirs() -> Iterator[Path]:
+    """Каталоги, где обычно лежит node.exe / npm.cmd."""
+    seen: set[str] = set()
+
+    def push(path: Path | None) -> Iterator[Path]:
+        if path is None:
+            return
+        key = str(path).lower()
+        if key in seen or not path.is_dir():
+            return
+        seen.add(key)
+        yield path
+
+    fixed = [
+        (_env_path("ProgramFiles") or Path(r"C:\Program Files")) / "nodejs",
+        (_env_path("ProgramFiles(x86)") or Path(r"C:\Program Files (x86)")) / "nodejs",
+        (_env_path("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        / "Programs" / "nodejs",
+        (_env_path("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Volta" / "bin",
+        (_env_path("ProgramData") or Path(r"C:\ProgramData")) / "chocolatey" / "bin",
+        (_env_path("USERPROFILE") or Path.home()) / "scoop" / "apps" / "nodejs" / "current",
+        (_env_path("USERPROFILE") or Path.home()) / "scoop" / "shims",
+    ]
+    for folder in fixed:
+        yield from push(folder)
+
+    # nvm-windows: %APPDATA%\nvm\v24.20.0 — версии перебираем от новых к старым.
+    versioned: list[Path] = []
+    for root in (
+        (_env_path("APPDATA") or Path.home() / "AppData" / "Roaming") / "nvm",
+        (_env_path("ProgramData") or Path(r"C:\ProgramData")) / "nvm",
+        (_env_path("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        / "fnm" / "node-versions",
+    ):
+        if not root.is_dir():
+            continue
+        try:
+            for child in root.iterdir():
+                if not child.is_dir():
+                    continue
+                versioned.append(child)
+                versioned.append(child / "installation")   # раскладка fnm
+        except OSError:
+            continue
+    versioned.sort(key=lambda p: p.name, reverse=True)
+    for folder in versioned:
+        yield from push(folder)
+
+
+def node_path() -> str | None:
+    """Путь к node.exe: явная настройка → PATH → стандартные места."""
+    explicit = os.environ.get("JARVIS_NODE")
+    if explicit and Path(explicit).exists():
+        return explicit
+    found = shutil.which("node")
+    if found:
+        return found
+    for folder in _node_install_dirs():
+        candidate = folder / NODE_EXE
+        if candidate.exists():
+            return str(candidate)
+    return None
+
 
 def node_version() -> str | None:
-    """Версия Node.js или None, если его нет в PATH."""
-    node = shutil.which("node")
+    """Версия Node.js или None, если его нет."""
+    node = node_path()
     if not node:
         return None
     try:
@@ -50,7 +130,25 @@ def node_version() -> str | None:
 
 
 def npm_path() -> str | None:
-    return shutil.which("npm")
+    """Путь к npm. Ищем рядом с найденным node и в стандартных каталогах."""
+    explicit = os.environ.get("JARVIS_NPM")
+    if explicit and Path(explicit).exists():
+        return explicit
+    found = shutil.which("npm")
+    if found:
+        return found
+
+    folders: list[Path] = []
+    node = node_path()
+    if node:
+        folders.append(Path(node).parent)
+    folders.extend(_node_install_dirs())
+    for folder in folders:
+        for name in NPM_NAMES:
+            candidate = folder / name
+            if candidate.exists():
+                return str(candidate)
+    return None
 
 
 def electron_path() -> Path | None:
@@ -80,7 +178,7 @@ def _ensure_electron_binary() -> bool:
         return True
     if not electron_package_installed():
         return False
-    node = shutil.which("node")
+    node = node_path()
     if node is None:
         log("node не найден — не могу скачать бинарник Electron", "error")
         return False
@@ -126,11 +224,13 @@ def status() -> dict:
     """Короткая сводка для --check."""
     return {
         "node": node_version(),
+        "node_path": node_path(),
         "npm": npm_path(),
         "electron": electron_path(),
         "deps": node_modules_ready(),
         "built": is_built(),
         "stale": needs_rebuild() if is_built() else False,
+        "ready": is_built() and electron_path() is not None,
     }
 
 
@@ -153,23 +253,41 @@ def _run(cmd: list[str], timeout: float | None = None) -> bool:
     return True
 
 
+NODE_HINT = ("Установите Node.js 20+ с https://nodejs.org (или укажите путь "
+             "переменной JARVIS_NODE), затем запустите: python main.py --rebuild-desktop")
+
+
 def ensure_built(rebuild: bool = False, install: bool = True) -> bool:
-    """Готовит desktop/ к запуску. True — можно запускать Electron."""
+    """Готовит desktop/ к запуску. True — можно запускать Electron.
+
+    npm нужен только для установки зависимостей и сборки. Если сборка уже
+    готова, а electron.exe на месте, окно запускается и без Node: иначе
+    сломанный/удалённый Node навсегда «убивал» интерфейс, хотя всё собрано.
+    """
     if not DESKTOP_DIR.exists():
         log("Папка desktop/ не найдена — оверлей недоступен", "error")
         return False
-    if npm_path() is None:
-        log("npm не найден. Установите Node.js 20+ с https://nodejs.org", "error")
+
+    npm = npm_path()
+    need_install = install and not node_modules_ready()
+    need_build = rebuild or needs_rebuild()
+
+    if (need_install or need_build) and npm is None:
+        if is_built() and electron_path() is not None:
+            log("npm не найден, но сборка окна уже готова — запускаю как есть. "
+                "Для пересборки нужен Node.js 20+", "warn")
+            return True
+        log("npm не найден, а окно нужно собрать. " + NODE_HINT, "error")
         return False
 
-    if install and not node_modules_ready():
+    if need_install:
         log("Первый запуск оверлея: ставлю зависимости (это займёт пару минут)", "info")
-        if not _run(["npm", "install", "--no-audit", "--no-fund"]):
+        if not _run([npm, "install", "--no-audit", "--no-fund"]):   # type: ignore[list-item]
             log("Зависимости не установились — оверлей не запустится", "error")
             return False
 
-    if rebuild or needs_rebuild():
-        if not _run(["npm", "run", "build"]):
+    if need_build:
+        if not _run([npm, "run", "build"]):   # type: ignore[list-item]
             log("Сборка оверлея не удалась", "error")
             return False
 
@@ -183,10 +301,21 @@ def ensure_built(rebuild: bool = False, install: bool = True) -> bool:
 # -------------------------------------------------------------------- запуск
 
 class OverlayProcess:
-    """Дочерний Electron. Гасится деревом процессов."""
+    """Дочерний Electron. Гасится деревом процессов.
 
-    def __init__(self, process: subprocess.Popen) -> None:
+    Следит за процессом сам: если окно умирает на первых секундах (падение
+    GPU-процесса), перезапускает его с флагами обхода и запоминает их. Это
+    не блокирует запуск ассистента — голос стартует сразу.
+    """
+
+    def __init__(self, process: subprocess.Popen, api_url: str = "",
+                 base_flags: list[str] | None = None,
+                 allow_fallback: bool = True) -> None:
         self.process = process
+        self._api_url = api_url
+        self._base_flags = list(base_flags or [])
+        self._allow_fallback = allow_fallback
+        self._started_at = time.monotonic()
         self._stopped = False
         self._watcher = threading.Thread(target=self._watch, name="overlay-watch",
                                          daemon=True)
@@ -196,14 +325,37 @@ class OverlayProcess:
     def pid(self) -> int | None:
         return self.process.pid
 
+    def _try_fallback(self, code: int) -> bool:
+        """Перезапуск с обходом падения GPU. True — процесс заменён."""
+        if not self._allow_fallback or self._stopped:
+            return False
+        if time.monotonic() - self._started_at > EARLY_CRASH_WINDOW:
+            return False        # окно жило нормально — это обычное закрытие
+        self._allow_fallback = False
+        log(f"Окно закрылось через {time.monotonic() - self._started_at:.1f} с "
+            f"(код {code}) — пробую обход падения GPU", "warn")
+        flags = [*self._base_flags, *FALLBACK_FLAGS]
+        process = _launch_once(self._api_url, flags)
+        if process is None:
+            return False
+        self.process = process
+        self._started_at = time.monotonic()
+        _save_flags(FALLBACK_FLAGS)
+        return True
+
     def _watch(self) -> None:
-        code = self.process.wait()
-        if self._stopped:
+        while True:
+            code = self.process.wait()
+            if self._stopped:
+                return
+            if self._try_fallback(code):
+                continue
+            if code == 0:
+                log("Оверлей закрыт пользователем", "info")
+            else:
+                log(f"Оверлей завершился с кодом {code}. "
+                    "Проверьте окружение: python main.py --check", "warn")
             return
-        if code == 0:
-            log("Оверлей закрыт пользователем", "info")
-        else:
-            log(f"Оверлей завершился с кодом {code}", "warn")
 
     def stop(self, timeout: float = 5.0) -> None:
         """Идемпотентная остановка: можно звать из хука выключения."""
@@ -228,8 +380,48 @@ class OverlayProcess:
             log("Оверлей не закрылся штатно", "warn")
 
 
-def launch(api_url: str, disable_gpu: bool | None = None) -> OverlayProcess | None:
-    """Запускает Electron, привязанный к уже работающему ядру."""
+# --------------------------------------------------------------- запуск GPU
+#
+# На части машин GPU-процесс Electron падает с 0xC0000005 сразу после старта:
+# под sandbox-ом в него инжектятся сторонние DLL (антивирус, оверлеи, «чистильщики»).
+# Chromium после нескольких падений пишет «GPU process isn't usable. Goodbye» и
+# закрывает всё приложение — снаружи это выглядит как «окно не запускается».
+# Лечится флагом --disable-gpu-sandbox: рендер остаётся аппаратным, sandbox
+# снимается только с GPU-процесса.
+
+GPU_SANDBOX_FLAG = "--disable-gpu-sandbox"
+FALLBACK_FLAGS = [GPU_SANDBOX_FLAG]
+
+# Файл-памятка: если обход уже сработал, второй раз не тратим время на падение.
+FLAGS_FILE = Path(config.DATA_DIR) / "overlay_flags.json"
+
+# Сколько ждём при старте, чтобы понять «живёт или упал».
+EARLY_CRASH_WINDOW = 8.0
+
+
+def _load_flags() -> list[str]:
+    """Сохранённые флаги обхода (только из белого списка)."""
+    try:
+        raw = FLAGS_FILE.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return []
+    flags = data.get("flags") if isinstance(data, dict) else None
+    if not isinstance(flags, list):
+        return []
+    return [flag for flag in flags if flag in FALLBACK_FLAGS]
+
+
+def _save_flags(flags: list[str]) -> None:
+    try:
+        FLAGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        FLAGS_FILE.write_text(json.dumps({"flags": flags}, ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    except OSError as exc:
+        log(f"Не удалось сохранить флаги оверлея: {exc}", "debug")
+
+
+def _launch_once(api_url: str, extra_flags: list[str]) -> subprocess.Popen | None:
     electron = electron_path()
     if electron is None:
         log("Electron не установлен — оверлей не запустится", "error")
@@ -244,20 +436,34 @@ def launch(api_url: str, disable_gpu: bool | None = None) -> OverlayProcess | No
     env["JARVIS_NO_SIDECAR"] = "1"          # Python уже запущен — второй не нужен
     env["JARVIS_API"] = api_url.rstrip("/")
 
-    args = [str(electron)]
-    gpu_off = disable_gpu if disable_gpu is not None else \
-        os.environ.get("JARVIS_DISABLE_GPU") == "1"
-    if gpu_off:
-        args.append("--disable-gpu")
-    args.append(".")
+    args = [str(electron), *extra_flags, "."]
 
-    log(f"Запускаю оверлей: {api_url}", "info")
+    log(f"Запускаю оверлей: {api_url}"
+        + (f" (флаги: {' '.join(extra_flags)})" if extra_flags else ""), "info")
     try:
-        process = subprocess.Popen(args, cwd=str(DESKTOP_DIR), env=env)
+        return subprocess.Popen(args, cwd=str(DESKTOP_DIR), env=env)
     except OSError as exc:
         log(f"Оверлей не запустился: {exc}", "error")
         return None
-    return OverlayProcess(process)
+
+
+def launch(api_url: str, disable_gpu: bool | None = None) -> OverlayProcess | None:
+    """Запускает Electron, привязанный к уже работающему ядру.
+
+    Флаги обхода (если обход уже находили) подставляются сразу, иначе окно
+    перезапустится автоматически при падении GPU-процесса.
+    """
+    gpu_off = disable_gpu if disable_gpu is not None else \
+        os.environ.get("JARVIS_DISABLE_GPU") == "1"
+
+    base_flags: list[str] = ["--disable-gpu"] if gpu_off else []
+    known = _load_flags()
+
+    process = _launch_once(api_url, [*base_flags, *known])
+    if process is None:
+        return None
+    return OverlayProcess(process, api_url=api_url, base_flags=base_flags,
+                          allow_fallback=not known)
 
 
 def run(api_url: str, rebuild: bool = False) -> OverlayProcess | None:
@@ -265,6 +471,22 @@ def run(api_url: str, rebuild: bool = False) -> OverlayProcess | None:
     if not ensure_built(rebuild=rebuild):
         return None
     return launch(api_url)
+
+
+def show_window(api_url: str) -> int | None:
+    """Показать окно уже работающего ядра (повторный клик по ярлыку).
+
+    Electron держит single-instance lock: если окно открыто, новый процесс
+    сразу выходит, а существующее окно всплывает наверх. Поэтому за процессом
+    не следим — нам нужен только факт запуска.
+    """
+    flags: list[str] = []
+    if os.environ.get("JARVIS_DISABLE_GPU") == "1":
+        flags.append("--disable-gpu")
+    flags.extend(_load_flags())
+
+    process = _launch_once(api_url, flags)
+    return process.pid if process is not None else None
 
 
 def main() -> int:
@@ -278,11 +500,13 @@ def main() -> int:
     args = parser.parse_args()
 
     info = status()
-    print(f"Node:     {info['node'] or 'не найден'}")
+    print(f"Node:     {info['node'] or 'не найден'}  ({info['node_path'] or '—'})")
     print(f"npm:      {info['npm'] or 'не найден'}")
     print(f"Electron: {info['electron'] or 'не установлен'}")
     print(f"Сборка:   {'есть' if info['built'] else 'нет'}"
           f"{' (устарела)' if info['stale'] else ''}")
+    if not info["ready"]:
+        print("           окно не готово к запуску — см. подсказку ниже")
 
     process = run(args.api, rebuild=args.rebuild)
     if process is None:

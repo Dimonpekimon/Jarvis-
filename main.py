@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -216,6 +217,52 @@ def run_list_voices() -> int:
     return 0
 
 
+def _local_http_json(url: str, timeout: float = 1.5) -> dict | None:
+    """GET к своему же API. Прокси не используем — адрес петлевой."""
+    import urllib.request
+
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(url, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _running_core(port: int | None) -> str | None:
+    """Адрес уже работающего ядра на этом порту (None — порт свободен)."""
+    import config
+
+    base = f"http://127.0.0.1:{port or config.API_PORT}"
+    data = _local_http_json(f"{base}/api/health")
+    return base if data and data.get("ok") else None
+
+
+def _attach_to_running(base_url: str, no_desktop: bool) -> int:
+    """Второй экземпляр не нужен: показываем окно уже работающего ассистента.
+
+    Это и есть поведение ярлыка «Джарвис» на рабочем столе: первый клик
+    запускает всё, повторный — просто возвращает окно на экран (микрофон
+    остаётся за первым экземпляром, второй голосовой цикл не стартует).
+    """
+    from utils import log
+
+    log("Джарвис уже запущен — второй экземпляр не нужен", "info")
+    log(f"Работающее ядро: {base_url}", "debug")
+    if no_desktop:
+        print(f"[i] Джарвис уже работает: {base_url}")
+        return 0
+
+    import overlay
+
+    pid = overlay.show_window(base_url)
+    if pid is None:
+        print("[!] Джарвис уже работает, но показать окно не удалось")
+        return 1
+    log(f"Показываю окно работающего ассистента (pid={pid})", "info")
+    return 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
 
@@ -256,6 +303,15 @@ def main() -> int:
     if args.telegram:
         config.TELEGRAM_ENABLED = True
 
+    # Порт нужен заранее: по нему понимаем, не работает ли уже другой экземпляр.
+    api_port = args.api_port if args.api_port is not None else args.ui_port
+    existing = _running_core(api_port)
+    if existing:
+        # Ярлык на рабочем столе нажимают повторно — это нормальный сценарий:
+        # второй голосовой цикл подрался бы за микрофон, поэтому просто
+        # показываем окно того экземпляра, который уже работает.
+        return _attach_to_running(existing, args.no_desktop or args.no_ui)
+
     mode = args.mode
     if args.text:
         mode = "text"
@@ -277,7 +333,6 @@ def main() -> int:
     # HTTP/SSE-канал, поэтому API поднимается всегда, даже без окна.
     from api import CoreAPI
 
-    api_port = args.api_port if args.api_port is not None else args.ui_port
     ui = CoreAPI(jarvis, port=api_port)
     if not ui.start():
         print("[!] Не удалось поднять API ядра — окно не сможет подключиться")
@@ -298,6 +353,15 @@ def main() -> int:
         else:
             print("[!] Окно не запустилось — работаю в консоли.")
             print("    Проверьте окружение: python main.py --check")
+            if config.BACKGROUND_MODE and not args.no_tts:
+                # Консоли нет: без голосового сообщения поломка окна выглядит
+                # как «приложение вообще не запускается».
+                try:
+                    import tts
+                    tts.speak("Не удалось открыть настольное окно, сэр. "
+                              "Работаю голосом. Подробности в журнале.")
+                except Exception:  # noqa: BLE001
+                    pass
 
     try:
         jarvis.run()

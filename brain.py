@@ -125,10 +125,13 @@ class Brain:
         if response.status_code in (400, 401, 403):
             self._available = False
             self._models = []
-            self._last_error = (
-                "Ключ Gemini неверный или отозван. Получите новый в Google AI Studio "
-                "и обновите GEMINI_API_KEY."
-            )
+            if _is_region_block(response.text or ""):
+                self._last_error = REGION_BLOCK_HINT
+            else:
+                self._last_error = (
+                    "Ключ Gemini неверный или отозван. Получите новый в Google AI Studio "
+                    "и обновите GEMINI_API_KEY."
+                )
             self._schedule_recheck()
             return []
         if response.status_code >= 400:
@@ -297,6 +300,8 @@ class Brain:
                 generation.pop("thinkingConfig", None)
                 retry_payload["generationConfig"] = generation
                 return self._post(model, retry_payload)
+            if _is_region_block(detail):
+                raise BrainUnavailable(REGION_BLOCK_HINT)
             if response.status_code in (401, 403) or "api key" in detail.lower():
                 raise BrainUnavailable(
                     "Ключ Gemini неверный или отозван. Обновите GEMINI_API_KEY."
@@ -398,6 +403,22 @@ def _error_text(response) -> str:
     except ValueError:
         message = (response.text or "")[:200]
     return message or f"ошибка {response.status_code}"
+
+
+REGION_BLOCK_HINT = (
+    "Gemini недоступен из этой сети: Google блокирует регион "
+    "(«User location is not supported»). Ключ при этом рабочий — включите "
+    "VPN или прокси и повторите."
+)
+
+
+def _is_region_block(text: str) -> bool:
+    """Google отказывает по географии, а не из-за ключа.
+
+    Такой ответ приходит с кодом 400 и легко маскируется под «неверный ключ».
+    """
+    lowered = (text or "").lower()
+    return "location is not supported" in lowered or "failed_precondition" in lowered
 
 
 def _extract_text(data: dict) -> str:
