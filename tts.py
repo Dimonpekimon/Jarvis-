@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """Синтез речи Джарвиса.
 
-Цепочка движков (первый доступный побеждает):
+Основной движок — **Piper**: локальная нейросеть, работает офлайн и не зависит
+от доступности серверов Microsoft. Цепочка (первый доступный побеждает):
 
-1. ``edge`` — нейронные голоса Microsoft (отличный русский, нужен интернет);
-2. ``piper`` — локальная нейросеть, работает офлайн (нужна скачанная модель);
+1. ``piper`` — локальная нейросеть, офлайн (модель скачивается при первом запуске);
+2. ``edge`` — нейронные голоса Microsoft (резерв, нужен интернет);
 3. ``sapi`` — системный голос Windows через pyttsx3 (работает всегда).
 
 Все фразы проговариваются в отдельном потоке через очередь, поэтому основной
@@ -26,6 +27,7 @@ import hashlib
 import queue
 import threading
 import time
+import urllib.request
 import wave
 from pathlib import Path
 
@@ -95,6 +97,28 @@ def _decode_with_pyav(path: Path, target_rate: int = 24000):
         return audio.astype(np.int16), target_rate
     finally:
         container.close()
+
+
+def _decode_wav_native(path: Path):
+    """Читает PCM WAV без ресемплинга — родная частота Piper (22050 Гц).
+
+    PyAV всегда приводит звук к 24 кГц (это нужно для mp3 edge-tts). Для WAV
+    пересэмплирование только тратит время и слегка портит голос, поэтому WAV
+    читаем напрямую стандартным ``wave``.
+    """
+    with wave.open(str(path), "rb") as wav_file:
+        channels = wav_file.getnchannels()
+        width = wav_file.getsampwidth()
+        rate = wav_file.getframerate()
+        frames = wav_file.readframes(wav_file.getnframes())
+    if width != 2:
+        raise RuntimeError(f"ожидался 16-битный PCM, получено {width * 8} бит")
+    audio = np.frombuffer(frames, dtype=np.int16)
+    if channels > 1:
+        audio = audio.reshape(-1, channels)[:, 0]
+    if audio.size == 0:
+        raise RuntimeError("файл не содержит сэмплов")
+    return audio, rate
 
 
 def _play_with_mci(path: Path, cancel: threading.Event | None = None) -> None:
@@ -216,6 +240,20 @@ def play_audio_file(path: Path, on_level=None,
         return cancel is not None and cancel.is_set()
 
     errors = []
+    # WAV (Piper) играем в родной частоте: без декодера и без ресемплинга.
+    if path.suffix.lower() == ".wav" and HAS_NUMPY and HAS_SD:
+        try:
+            if cancelled():
+                raise _SpeechCancelled
+            audio, rate = _decode_wav_native(path)
+            if cancelled():
+                raise _SpeechCancelled
+            _play_decoded(audio, rate, on_level, cancel)
+            return
+        except _SpeechCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"wav: {exc}")
     if HAS_AV and HAS_SD:
         try:
             if cancelled():
@@ -258,6 +296,41 @@ def _cache_key(*parts: str) -> str:
     return digest
 
 
+def prune_tts_cache(cache_dir: Path | None = None, *, now: float | None = None) -> None:
+    """Удаляет устаревшие и самые старые файлы кэша TTS.
+
+    Кэш — ускорение, а не архив: ограничение по возрасту и количеству файлов
+    предотвращает бесконечный рост данных при долгой работе ассистента.
+    """
+    directory = Path(cache_dir or config.CACHE_DIR)
+    if not directory.exists():
+        return
+    current = time.time() if now is None else float(now)
+    ttl_days = max(0.0, float(getattr(config, "TTS_CACHE_TTL_DAYS", 0) or 0))
+    max_files = max(0, int(getattr(config, "TTS_CACHE_MAX_FILES", 0) or 0))
+    files = [path for path in directory.iterdir()
+             if path.is_file() and path.suffix.lower() in {".mp3", ".wav"}]
+    if ttl_days:
+        deadline = current - ttl_days * 86400
+        for path in files[:]:
+            try:
+                if path.stat().st_mtime < deadline:
+                    path.unlink()
+                    files.remove(path)
+            except OSError:
+                continue
+    if max_files and len(files) > max_files:
+        try:
+            oldest_first = sorted(files, key=lambda path: path.stat().st_mtime)
+        except OSError:
+            return
+        for path in oldest_first[:len(files) - max_files]:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+
+
 def _edge_synthesize(text: str, out_path: Path) -> None:
     """Синтез через edge-tts (асинхронный API внутри синхронной обёртки)."""
     import edge_tts
@@ -297,6 +370,79 @@ def list_edge_voices(language_filter: str = "ru") -> list:
 
 
 # =====================================================================
+#  ГОЛОС PIPER (локальная модель)
+# =====================================================================
+def piper_model_path() -> Path:
+    """Путь к модели Piper; относительный путь считается от папки проекта."""
+    path = Path(config.PIPER_MODEL)
+    if not path.is_absolute():
+        path = config.BASE_DIR / path
+    return path
+
+
+def piper_model_ready(model_path: Path | None = None) -> bool:
+    """Есть ли на диске модель Piper вместе с её конфигом."""
+    model = Path(model_path) if model_path else piper_model_path()
+    return (model.exists() and model.stat().st_size > 0
+            and Path(str(model) + ".json").exists())
+
+
+def _download_to(url: str, destination: Path) -> None:
+    """Скачивает файл во временный ``.part`` и переименовывает только после успеха."""
+    partial = destination.with_suffix(destination.suffix + ".part")
+    partial.unlink(missing_ok=True)
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "Jarvis/3.1"})
+        with urllib.request.urlopen(request, timeout=60) as response, \
+                open(partial, "wb") as handle:
+            while True:
+                chunk = response.read(1 << 20)
+                if not chunk:
+                    break
+                handle.write(chunk)
+        if partial.stat().st_size == 0:
+            raise OSError("сервер вернул пустой файл")
+        partial.replace(destination)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+
+
+def ensure_piper_model(model_path: Path | None = None) -> Path:
+    """Возвращает модель Piper, при необходимости скачивая её с HuggingFace."""
+    model = Path(model_path) if model_path else piper_model_path()
+    config_path = Path(str(model) + ".json")
+    if piper_model_ready(model):
+        return model
+
+    if not bool(getattr(config, "PIPER_AUTO_DOWNLOAD", True)):
+        raise FileNotFoundError(
+            f"нет модели Piper: {model}. Скачайте голос: python download_voices.py"
+        )
+
+    log(f"Скачиваю голос Piper «{model.stem}» (около 63 МБ)...", "info")
+    model.parent.mkdir(parents=True, exist_ok=True)
+    started = time.time()
+    try:
+        _download_to(str(config.PIPER_MODEL_URL), model)
+        _download_to(str(config.PIPER_CONFIG_URL), config_path)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"не удалось скачать голос Piper: {exc}. Проверьте интернет или "
+            "выполните python download_voices.py"
+        ) from exc
+
+    # Дешёвая проверка, что скачался именно ONNX, а не страница ошибки.
+    if model.stat().st_size < 1_000_000:
+        model.unlink(missing_ok=True)
+        config_path.unlink(missing_ok=True)
+        raise RuntimeError("файл модели Piper повреждён (слишком маленький)")
+
+    log(f"Голос Piper готов за {time.time() - started:.1f} с: {model.name}", "info")
+    return model
+
+
+# =====================================================================
 #  ОРАТОР
 # =====================================================================
 class Speaker:
@@ -323,11 +469,15 @@ class Speaker:
         self._active_publish = True
         self._lock = threading.RLock()
         self._piper_voice = None
+        self._piper_lock = threading.Lock()
         self._sapi_engine = None
         self._sapi_lock = threading.Lock()
         self._idle = threading.Event()
         self._idle.set()
         self.on_spoken = None  # callable(text) -> None
+        # Никаких сетевых или аудиоопераций здесь нет — чистка быстрая и нужна
+        # только при создании единственного экземпляра Speaker.
+        prune_tts_cache()
 
     # ---------------- публичный интерфейс ----------------
     def start(self) -> None:
@@ -494,18 +644,35 @@ class Speaker:
     def _engine_order(self) -> list:
         order = []
         if self.requested_engine == "auto":
+            # Piper первым: он офлайн и не зависит от доступности edge-tts.
+            if config.FEATURES["piper"]:
+                order.append("piper")
             if config.FEATURES["edge_tts"]:
                 order.append("edge")
-            if config.FEATURES["piper"] and Path(config.PIPER_MODEL).exists():
-                order.append("piper")
             if config.FEATURES["pyttsx3"]:
                 order.append("sapi")
         else:
             order.append(self.requested_engine)
-            for fallback in ("edge", "piper", "sapi"):
+            for fallback in ("piper", "edge", "sapi"):
                 if fallback != self.requested_engine:
                     order.append(fallback)
         return order
+
+    def warmup(self) -> None:
+        """Заранее поднимает Piper в фоне, чтобы первая фраза не ждала загрузку."""
+        if not self.enabled:
+            return
+        order = self._engine_order()
+        if not order or order[0] != "piper":
+            return
+        threading.Thread(target=self._warmup_piper, name="tts-warmup",
+                         daemon=True).start()
+
+    def _warmup_piper(self) -> None:
+        try:
+            self._load_piper_voice()
+        except Exception as exc:  # noqa: BLE001
+            log(f"Прогрев Piper не удался: {exc}", "debug")
 
     def _speak(self, text: str, cancel: threading.Event | None = None) -> bool:
         """Проговаривает фразу, перебирая движки. True — фраза прозвучала.
@@ -542,48 +709,98 @@ class Speaker:
                          config.TTS_VOLUME, config.TTS_PITCH)
         out = config.CACHE_DIR / f"{key}.mp3"
         if not (config.TTS_USE_CACHE and out.exists() and out.stat().st_size > 0):
-            _edge_synthesize(text, out)
-            # Синтез мог закончиться уже после stop() — не проигрываем.
-            if cancel is not None and cancel.is_set():
-                raise _SpeechCancelled
-            if not out.exists() or out.stat().st_size == 0:
-                raise RuntimeError("edge-tts вернул пустой файл")
+            # Через временный файл: оборванная загрузка не должна осесть в кэше
+            # и потом «звучать» тишиной.
+            partial = out.with_suffix(".part.mp3")
+            try:
+                _edge_synthesize(text, partial)
+                # Синтез мог закончиться уже после stop() — не проигрываем.
+                if cancel is not None and cancel.is_set():
+                    raise _SpeechCancelled
+                if not partial.exists() or partial.stat().st_size == 0:
+                    raise RuntimeError("edge-tts вернул пустой файл")
+                partial.replace(out)
+            finally:
+                partial.unlink(missing_ok=True)
         if cancel is not None and cancel.is_set():
             raise _SpeechCancelled
         play_audio_file(out, self._emit_level, cancel)
 
     # ----- piper -----
-    def _speak_piper(self, text: str, cancel: threading.Event | None = None) -> None:
-        model_path = Path(config.PIPER_MODEL)
-        if not model_path.exists():
-            raise FileNotFoundError(
-                f"нет модели Piper: {model_path.name} "
-                "(скачать: python download_voices.py)"
-            )
-        from piper import PiperVoice
+    def _load_piper_voice(self):
+        """Загружает модель Piper один раз (потокобезопасно)."""
+        if self._piper_voice is not None:
+            return self._piper_voice
+        with self._piper_lock:
+            if self._piper_voice is None:
+                from piper import PiperVoice
 
+                model_path = ensure_piper_model()
+                log(f"Загружаю голос Piper: {model_path.name}", "info")
+                started = time.time()
+                self._piper_voice = PiperVoice.load(str(model_path))
+                log(f"Голос Piper готов за {time.time() - started:.1f} с.", "debug")
+        return self._piper_voice
+
+    @staticmethod
+    def _piper_config():
+        """Настройки синтеза Piper.
+
+        В piper-tts скорость задаётся не полем ``speed`` (его там нет), а
+        обратным ``length_scale``: 1.2 → быстрее, 0.8 → медленнее. Раньше здесь
+        передавался несуществующий ``speed``, исключение глушилось — и настройка
+        ``PIPER_SPEED`` молча не работала.
+        """
+        from piper.config import SynthesisConfig
+
+        speed_raw = getattr(config, "PIPER_SPEED", 1.0)
+        speed = 1.0 if speed_raw is None else float(speed_raw)
+        speed = min(max(speed, 0.5), 2.0)
+        volume_raw = getattr(config, "PIPER_VOLUME", 1.0)
+        # Именно проверка на None: volume=0.0 — это законное «выключить звук»,
+        # а `or 1.0` превратил бы его в полную громкость.
+        volume = 1.0 if volume_raw is None else float(volume_raw)
+        volume = min(max(volume, 0.0), 1.0)
+        return SynthesisConfig(length_scale=1.0 / speed, volume=volume)
+
+    @staticmethod
+    def _piper_cache_valid(path: Path) -> bool:
+        """Проверяет, что в кэше лежит целый WAV, а не обрывок синтеза."""
+        if not config.TTS_USE_CACHE:
+            return False
+        try:
+            if not path.exists() or path.stat().st_size <= 44:
+                return False
+            with wave.open(str(path), "rb") as wav_file:
+                return wav_file.getnframes() > 0 and wav_file.getframerate() > 0
+        except (OSError, EOFError, wave.Error):
+            return False
+
+    def _speak_piper(self, text: str, cancel: threading.Event | None = None) -> None:
         if cancel is not None and cancel.is_set():
             raise _SpeechCancelled
-        if self._piper_voice is None:
-            log(f"Загружаю голос Piper: {model_path.name}", "debug")
-            self._piper_voice = PiperVoice.load(str(model_path))
+        voice = self._load_piper_voice()
 
-        key = _cache_key("piper", text, str(model_path), str(config.PIPER_SPEED))
+        model_path = piper_model_path()
+        key = _cache_key("piper", text, str(model_path),
+                         str(config.PIPER_SPEED), str(config.PIPER_VOLUME))
         out = config.CACHE_DIR / f"{key}.wav"
-        if not (config.TTS_USE_CACHE and out.exists() and out.stat().st_size > 0):
-            syn_config = None
+
+        if not self._piper_cache_valid(out):
+            # Синтезируем во временный файл: недописанный WAV не должен попасть
+            # в кэш и «озвучиваться» при следующем запросе той же фразы.
+            partial = out.with_suffix(".part.wav")
             try:
-                from piper.config import SynthesisConfig
-                syn_config = SynthesisConfig(speed=float(config.PIPER_SPEED))
-            except Exception:  # noqa: BLE001
-                syn_config = None
-            with wave.open(str(out), "wb") as wav_file:
-                if syn_config is not None:
-                    self._piper_voice.synthesize_wav(text, wav_file, syn_config=syn_config)
-                else:
-                    self._piper_voice.synthesize_wav(text, wav_file)
-            if cancel is not None and cancel.is_set():
-                raise _SpeechCancelled
+                with wave.open(str(partial), "wb") as wav_file:
+                    voice.synthesize_wav(text, wav_file, syn_config=self._piper_config())
+                if cancel is not None and cancel.is_set():
+                    raise _SpeechCancelled
+                if not self._piper_cache_valid(partial):
+                    raise RuntimeError("Piper вернул пустой файл")
+                partial.replace(out)
+            finally:
+                partial.unlink(missing_ok=True)
+
         if cancel is not None and cancel.is_set():
             raise _SpeechCancelled
         play_audio_file(out, self._emit_level, cancel)
@@ -664,6 +881,9 @@ class Speaker:
         cancelled = False
         engine.say(text)
         engine.startLoop(useDriverLoop=False)
+        # Страховка от зависания: если SAPI не пришлёт finished-utterance
+        # (сбой драйвера), поток озвучки не должен застрять навсегда.
+        deadline = time.monotonic() + max(15.0, len(text) * 0.45 + 5.0)
         try:
             while not done.is_set():
                 if cancel is not None and cancel.is_set():
@@ -672,6 +892,11 @@ class Speaker:
                     deadline = time.monotonic() + 1.0
                     while not done.is_set() and time.monotonic() < deadline:
                         engine.iterate()
+                    break
+                if time.monotonic() > deadline:
+                    log("SAPI не подтвердил завершение фразы — останавливаю.", "warn")
+                    engine.stop()
+                    cancelled = True   # фраза не прозвучала целиком
                     break
                 engine.iterate()
                 time.sleep(0.005)

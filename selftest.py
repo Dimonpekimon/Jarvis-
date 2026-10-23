@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Быстрые проверки логики Джарвиса без микрофона и без Ollama.
+"""Быстрые проверки логики Джарвиса без микрофона и без нейросети.
 
 Запуск:  python selftest.py
 """
@@ -7,18 +7,23 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import sys
 import tempfile
 import time
 from pathlib import Path
 
+import numpy as np
+
 import actions
+import brain
 import config
 import events
 import jarvis_core
 import make_commands_list
 import make_shortcut
+import speech
 import tts
 import webui
 from actions import (
@@ -33,7 +38,7 @@ from actions import (
 from jarvis_core import Jarvis
 from responses import ResponseBank
 from speech import Listener
-from utils import CalcError, plural_ru, safe_calculate
+from utils import CalcError, normalize_command_text, plural_ru, safe_calculate
 
 PASSED = 0
 FAILED = 0
@@ -54,7 +59,7 @@ def section(title: str) -> None:
 
 
 def main() -> int:
-    print("Проверка Джарвиса v3.0")
+    print("Проверка Джарвиса v3.1")
 
     # ---------------- Калькулятор ----------------
     section("Калькулятор (главный исправленный баг)")
@@ -268,6 +273,8 @@ def main() -> int:
         ("какая погода в Москве", "москве"),
         ("погода в санкт-петербурге", "санкт-петербурге"),
         ("погода", ""),
+        ("погода.", ""),
+        ("погода в Минске.", "минске"),
         ("какая погода", ""),
         ("погода Москва", "москва"),
     ]
@@ -331,6 +338,40 @@ def main() -> int:
     for phrase, expected in reminder_cases:
         check(f"«{phrase}»", jarvis._extract_reminder_text(phrase), expected)
 
+    # ---------------- Фильтрация распознавания (Vosk) ----------------
+    section("Vosk: артефакты, повторы и распознавание")
+
+    class _RecognizerStub:
+        def __init__(self, text):
+            self.text = text
+            self.words = False
+
+        def SetWords(self, value):
+            self.words = bool(value)
+
+        def AcceptWaveform(self, _data):
+            return True
+
+        def FinalResult(self):
+            return json.dumps({"text": self.text})
+
+    listener = Listener()
+    listener._new_recognizer = lambda: _RecognizerStub("какая погода")
+    check("достоверная речь проходит",
+          listener.transcribe(np.array([1, 2], dtype=np.int16)), "какая погода")
+
+    listener._new_recognizer = lambda: _RecognizerStub("")
+    check("тишина даёт пустую строку",
+          listener.transcribe(np.array([0], dtype=np.int16)), "")
+
+    check("артефакт «продолжение следует» отброшен",
+          Listener._clean("продолжение следует"), "")
+    check("повтор одного слова отброшен", Listener._clean("ну ну ну ну"), "")
+    check("обычная фраза сохраняется", Listener._clean("какая погода"), "какая погода")
+    check("модель Vosk распакована", isinstance(speech.model_ready(), bool), True)
+    check("пунктуация удаляется только для команд", normalize_command_text("погода в Минске."),
+          "погода в минске")
+
     # ---------------- Снятие слова-активатора ----------------
     section("Снятие слова-активатора")
     check("джарвис, какая погода", Jarvis._strip_wake_word("джарвис, какая погода"), "какая погода")
@@ -343,7 +384,7 @@ def main() -> int:
     section("Голосовой цикл: одна команда на одно «Джарвис»")
 
     class FakeJarvis(Jarvis):
-        """Джарвис с подменённым слухом: микрофон и Whisper не нужны."""
+        """Джарвис с подменённым слухом: микрофон и Vosk не нужны."""
 
         def __init__(self, heard: str, command: str = ""):
             super().__init__(mode="voice", enable_tts=False)
@@ -358,7 +399,7 @@ def main() -> int:
         def _listen_for_wake(self):
             return self._heard
 
-        def _listen_command(self):
+        def _listen_command(self, *args, **kwargs):
             self.command_calls += 1
             return self._command
 
@@ -387,10 +428,39 @@ def main() -> int:
     check("шум вместо команды отброшен", noise._next_utterance(), "")
     check("...но ассистент переспросил", noise.acks, 1)
 
+    # Регрессия: после отклика команда приходила вместе со словом «Джарвис»
+    # и не совпадала с реестром — ассистент отвечал «не расслышал».
+    dice = FakeJarvis("джарвис подбрось кости")
+    check("«кости» понимаются сразу, без отклика",
+          dice._next_utterance(), "подбрось кости")
+    check("...отклик не звучит", dice.acks, 0)
+
+    dice_after_ack = FakeJarvis("джарвис", "джарвис подбрось кости")
+    check("повтор команды с обращением очищается",
+          dice_after_ack._next_utterance(), "подбрось кости")
+    check("...прозвучал один отклик", dice_after_ack.acks, 1)
+
+    unknown = FakeJarvis("джарвис включи музыку")
+    check("незнакомая просьба уходит нейросети",
+          unknown._next_utterance(), "включи музыку")
+    check("...без лишнего отклика", unknown.acks, 0)
+    check("«кости» — известная команда",
+          jarvis.match_intent("подбрось кости")[0].name, "random_choice")
+
+    follow_unknown = FakeJarvis("джарвис", "включи музыку")
+    check("просьба после отклика не теряется",
+          follow_unknown._next_utterance(), "включи музыку")
+
+    short_noise = FakeJarvis("джарвис", "ну да")
+    check("короткий шум после отклика отброшен",
+          short_noise._next_utterance(), "")
+
     check("отклик есть в банке реплик", ResponseBank.has("wake_ack"), True)
     check("отклик непустой", bool(ResponseBank.get("wake_ack")), True)
-    check("«ну» — не команда", Jarvis._looks_like_command("ну"), False)
-    check("«погода» — команда", Jarvis._looks_like_command("погода"), True)
+    check("«ну» — не команда", jarvis._looks_like_command("ну"), False)
+    check("«грам» — не команда", jarvis._looks_like_command("грам"), False)
+    check("«погода» — команда", jarvis._looks_like_command("погода"), True)
+    check("свободный вопрос допускается", jarvis._looks_like_command("почему небо синее"), True)
     check("отклик включается настройкой", config.WAKE_ACK_ENABLED, True)
     check("тишина в конце фразы укорочена", config.SILENCE_SEC <= 0.6, True)
     check("пауза после озвучки задана", config.MIC_CLEAR_GUARD > 0, True)
@@ -404,10 +474,10 @@ def main() -> int:
     check("слушатель отдаёт фразу целиком", hasattr(Listener, "listen_wake"), True)
     check("фоновый режим по умолчанию выключен", config.BACKGROUND_MODE, False)
     check("лимит на поиск города задан", config.WEATHER_DEADLINE <= 10, True)
-    # Сегфолт: winrt (OCR), импортированный раньше Whisper, роняет загрузку модели.
-    check("чтение экрана поднимает Whisper заранее",
+    # Распознаватель поднимается заранее — до первого обращения к OCR экрана.
+    check("чтение экрана поднимает распознаватель заранее",
           "_warm_recognizer" in inspect.getsource(Jarvis._h_read_screen), True)
-    check("анализ экрана поднимает Whisper заранее",
+    check("анализ экрана поднимает распознаватель заранее",
           "_warm_recognizer" in inspect.getsource(Jarvis._h_analyze_screen), True)
 
     # ---------------- Приветствие по времени суток ----------------
@@ -560,8 +630,25 @@ def main() -> int:
     check("data-папка создана", config.DATA_DIR.exists(), True)
     check("папка моделей создана", config.MODELS_DIR.exists(), True)
     check("numpy доступен", config.FEATURES["numpy"], True)
-    check("faster-whisper доступен", config.FEATURES["faster_whisper"], True)
+    check("Vosk доступен", config.FEATURES["vosk"], True)
     check("edge-tts доступен", config.FEATURES["edge_tts"], True)
+    check("мозг настроен на Gemini", config.GEMINI_MODEL.startswith("gemini"), True)
+    check("поле ключа Gemini задано", isinstance(config.GEMINI_API_KEY, str), True)
+    check("есть запасная модель", bool(config.GEMINI_FALLBACK_MODELS), True)
+    check("markdown вычищается из ответа", brain.plain_text("**привет**, сэр"), "привет, сэр")
+
+    # ---------------- Озвучка Piper ----------------
+    section("Озвучка: Piper основной")
+    check("движок по умолчанию — piper", config.TTS_ENGINE, "piper")
+    check("модель Piper на месте", tts.piper_model_ready(), True)
+    check("скорость Piper переводится в length_scale",
+          round(tts.Speaker._piper_config().length_scale, 3), 1.0)
+    silent_speaker = tts.Speaker(enabled=False, engine="auto")
+    check("auto начинает с Piper", silent_speaker._engine_order()[0], "piper")
+    check("резерв edge и sapi сохранён",
+          silent_speaker._engine_order()[1:], ["edge", "sapi"])
+    check("путь к модели скачивается при отсутствии",
+          hasattr(tts, "ensure_piper_model"), True)
 
     # ---------------- Выключение ассистента ----------------
     # Идёт последним: shutdown() глушит общий динамик, после него проверять

@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Ядро Джарвиса v3.0.
+"""Ядро Джарвиса v3.1.
 
 Отвечает за распознавание намерения (intent), выполнение команды и главный цикл
 ассистента. Вся логика действий вынесена в отдельные модули:
 
-* :mod:`speech`    — микрофон и Whisper;
+* :mod:`speech`    — микрофон и распознавание речи (Vosk);
 * :mod:`tts`       — озвучка;
-* :mod:`brain`     — локальная LLM (Ollama);
+* :mod:`brain`     — нейросеть Gemini (бесплатный API);
 * :mod:`actions`   — системные операции;
 * :mod:`scheduler` — таймеры и напоминания;
 * :mod:`vision`    — скриншот и анализ изображения;
@@ -33,7 +33,7 @@ from scheduler import Scheduler
 from speech import Listener, SpeechError
 from telegram_bot import TelegramBridge
 from tts import get_speaker
-from utils import contains_word, log, normalize_text
+from utils import contains_word, log, normalize_command_text, normalize_text
 from vision import Vision
 
 _MONTHS_GENITIVE = (
@@ -215,6 +215,10 @@ INTENTS = [
                           "перевести в сон"], "_h_sleep_mode"),
 
     Intent("random_choice", ["брось кубик", "подбрось монетку", "брось монетку",
+                             "кинь монетку", "брось монету", "подбрось монету",
+                             "кинь кубик", "подбрось кубик", "брось кубики",
+                             "подбрось кубики", "кинь кости", "брось кости",
+                             "подбрось кости", "орел или решка",
                              "случайное число", "монетка", "кубик"], "_h_random",
            example="подбрось монетку"),
     Intent("password", ["сгенерируй пароль", "сгенерируй надёжный пароль",
@@ -313,7 +317,7 @@ class Jarvis:
         pairs = []
         for intent in INTENTS:
             for alias in intent.aliases:
-                pairs.append((normalize_text(alias), intent))
+                pairs.append((normalize_command_text(alias), intent))
         pairs.sort(key=lambda item: len(item[0]), reverse=True)
         return pairs
 
@@ -343,7 +347,7 @@ class Jarvis:
         Результат кэшируется: в пределах одной реплики фраза (или её часть)
         сопоставляется несколько раз, а перебор идёт по всем ~250 синонимам.
         """
-        normalized = normalize_text(text)
+        normalized = normalize_command_text(text)
         if not normalized:
             return None, None
         cached = self._match_cache.get(normalized)
@@ -479,25 +483,24 @@ class Jarvis:
             return self._llm_offline_answer(text, str(exc))
 
     def _llm_offline_answer(self, text: str, reason: str) -> str:
-        """Что делать, если Ollama недоступна: ищем в интернете.
+        """Безопасный ответ при недоступной нейросети.
 
-        Подсказку про установку показываем только один раз за сеанс, чтобы
-        она не примешивалась к каждому ответу.
+        Веб-поиск остаётся отдельной явной командой «найди ...». Автопоиск для
+        любой непризнанной голосовой реплики превращал шум в минутное чтение
+        случайной статьи. Совместимый режим можно включить настройкой, но он
+        выключен по умолчанию.
         """
+        if not getattr(config, "LLM_OFFLINE_WEB_FALLBACK", False):
+            if not self._llm_warned:
+                self._llm_warned = True
+                log(reason, "warn")
+            return "Не расслышал команду, сэр. Повторите или скажите «список команд»."
+
         self._fill_silence("search")
         found = self.actions.web_search(text)
-
-        note = ""
-        if not self._llm_warned:
-            self._llm_warned = True
-            note = f"{reason} Пока отвечу по данным из интернета. "
-
         if not found or "не удалось" in found.lower():
-            if note:
-                return (note + "По этому запросу ничего не нашлось — "
-                        "попробуйте переформулировать или скажите «список команд».")
             return ResponseBank.get("unknown")
-        return f"{note}Вот что нашёл: {found}"
+        return f"Вот что нашёл: {found}"
 
     # ==================================================================
     #  ОБРАБОТЧИКИ: ВРЕМЯ, ПОГОДА, ОБЩЕНИЕ
@@ -744,15 +747,15 @@ class Jarvis:
     #  ОБРАБОТЧИКИ: ЭКРАН И ЗАМЕТКИ
     # ==================================================================
     def _warm_recognizer(self) -> None:
-        """Поднимает Whisper ДО первого обращения к OCR экрана.
+        """Поднимает распознаватель заранее — до первого обращения к OCR экрана.
 
-        Особенность Windows: если модуль ``winrt`` (движок OCR) импортирован
-        РАНЬШЕ, чем создана модель faster-whisper, то загрузка модели валит
-        процесс сегфолтом — проверено, код возврата 139. Обратный порядок
-        (сначала Whisper, потом OCR) работает штатно.
+        Загрузка модели Vosk занимает около секунды, и без прогрева она
+        пришлась бы на первую команду. Кроме того, ранняя инициализация
+        распознавателя перед импортом ``winrt`` (движок OCR Windows) избавляет
+        от старой проблемы с падением процесса при обратном порядке — теперь
+        распознавание работает на Vosk, но порядок оставляем безопасным.
 
-        В текстовом режиме Whisper не загружается вовсе, поэтому и опасности
-        нет — там ничего не делаем и время не тратим.
+        В текстовом режиме распознаватель не нужен — там ничего не делаем.
         """
         if self.mode == "text" or not self._voice_available():
             return
@@ -761,7 +764,7 @@ class Jarvis:
         try:
             self._ensure_listener().preload_model()
         except Exception as exc:  # noqa: BLE001
-            log(f"Whisper не поднялся перед распознаванием экрана: {exc}", "warn")
+            log(f"Распознаватель не поднялся перед чтением экрана: {exc}", "warn")
 
     def _h_screenshot(self, _raw, _alias) -> str:
         path = self.actions.screenshot()
@@ -770,11 +773,11 @@ class Jarvis:
         return ResponseBank.get("screenshot", value=str(path))
 
     def _h_read_screen(self, _raw, _alias) -> str:
-        self._warm_recognizer()   # иначе winrt уронит загрузку Whisper
+        self._warm_recognizer()   # распознаватель поднимаем до OCR
         return self.vision.read_screen_text()
 
     def _h_analyze_screen(self, raw, _alias) -> str:
-        self._warm_recognizer()   # иначе winrt уронит загрузку Whisper
+        self._warm_recognizer()   # распознаватель поднимаем до OCR
         question = self._strip_aliases(raw, ("посмотри на экран", "проанализируй экран",
                                              "что происходит на экране", "оцени экран",
                                              "что на экране", "что я делаю"))
@@ -891,7 +894,7 @@ class Jarvis:
     # ==================================================================
     @staticmethod
     def _extract_city(raw: str) -> str:
-        tokens = normalize_text(raw).split()
+        tokens = normalize_command_text(raw).split()
         for index, token in enumerate(tokens):
             if token in ("в", "во") and index + 1 < len(tokens):
                 candidate = tokens[index + 1]
@@ -931,17 +934,18 @@ class Jarvis:
         return " ".join(parts)
 
     def status(self) -> str:
-        whisper_state = "загружена" if (self.listener and self.listener.model_ready) else "не загружена"
+        speech_state = "загружена" if (self.listener and self.listener.model_ready) else "не загружена"
         brain_ok, brain_message = self.brain.check()
         tts_engines = ", ".join(e for e in ("edge", "piper", "sapi")
                                 if e == "edge" and config.FEATURES["edge_tts"]
                                 or e == "piper" and config.FEATURES["piper"]
+                                and config.PIPER_MODEL.exists()
                                 or e == "sapi" and config.FEATURES["pyttsx3"]) or "нет"
         tasks = self.scheduler.upcoming(limit=2)
         wake_state = "включено" if config.WAKE_WORD_REQUIRED else "выключено"
         return (
             f"Режим: {self.mode}. "
-            f"Распознавание: Whisper «{config.WHISPER_MODEL}» ({whisper_state}). "
+            f"Распознавание: Vosk «{config.VOSK_MODEL_NAME}» ({speech_state}). "
             f"Озвучка: {tts_engines}. "
             f"Мозг: {'работает' if brain_ok else 'недоступен'} — {brain_message} "
             f"Слово-активатор: {wake_state}. "
@@ -952,9 +956,9 @@ class Jarvis:
 
     def _print_banner(self) -> None:
         log("=" * 62, "info")
-        log("  ДЖАРВИС v3.0 — голосовой ассистент", "info")
-        log(f"  Режим: {self.mode} | Whisper: {config.WHISPER_MODEL} | "
-            f"Модель: {config.OLLAMA_MODEL}", "info")
+        log("  ДЖАРВИС v3.1 — голосовой ассистент", "info")
+        log(f"  Режим: {self.mode} | Vosk: {config.VOSK_MODEL_NAME} | "
+            f"Модель: {config.GEMINI_MODEL}", "info")
         if self.background:
             log("  Фоновый запуск (ярлык на рабочем столе): без консоли, "
                 "управление голосом и через веб-интерфейс.", "info")
@@ -964,7 +968,7 @@ class Jarvis:
     #  ГЛАВНЫЙ ЦИКЛ
     # ==================================================================
     def _voice_available(self) -> bool:
-        return config.FEATURES["sounddevice"] and config.FEATURES["faster_whisper"]
+        return config.FEATURES["sounddevice"] and config.FEATURES["vosk"]
 
     def _ensure_listener(self) -> Listener:
         if self.listener is None:
@@ -1010,7 +1014,11 @@ class Jarvis:
         запись начинается только после тишины в динамиках.
         """
         if self.speaker.busy:
-            self.speaker.wait_until_done()
+            # Ограничение по времени — страховка от зависшего движка озвучки:
+            # иначе голосовой цикл замер бы навсегда в ожидании тишины.
+            self.speaker.wait_until_done(timeout=60.0)
+            if self.speaker.busy:
+                log("Озвучка не завершилась за 60 с — продолжаю слушать.", "warn")
         guard = float(getattr(config, "MIC_CLEAR_GUARD", 0.3) or 0.0)
         if guard > 0:
             time.sleep(guard)
@@ -1027,23 +1035,56 @@ class Jarvis:
             return ""
         return heard or ""
 
-    def _listen_command(self) -> str:
+    def _listen_command(self, start_timeout_sec: float = 6.0) -> str:
         """Записывает и распознаёт команду — уже после обращения."""
         self._wait_mic_clear()
         emit_state("listening")
         try:
-            return self._ensure_listener().listen_command()
+            return self._ensure_listener().listen_command(
+                start_timeout_sec=start_timeout_sec)
         except SpeechError as exc:
             log(f"{exc}. Перехожу в текстовый режим.", "error")
             self.mode = "text"
             return self._read_text()
 
-    # Короче этого — не команда, а шум распознавания («да», «ну»).
+    # Одиночные короткие слова обычно являются шумом распознавания. Свободный вопрос
+    # или просьба допускаются, но только с понятным вопросительным/повелительным
+    # маркером — иначе «ну», «да», «ага» уходили бы в нейросеть.
     _MIN_COMMAND_CHARS = 3
+    _QUESTION_PREFIXES = (
+        "что ", "кто ", "где ", "когда ", "почему ", "зачем ", "как ",
+        "объясни ", "расскажи ", "помоги ", "можешь ", "сколько ",
+    )
+    # Повелительные глаголы: фраза может не совпасть с реестром (новая
+    # формулировка), но это явно команда, а не шум. Лучше отдать её нейросети,
+    # чем отвечать «не расслышал» на понятную просьбу.
+    _IMPERATIVE_PREFIXES = (
+        "включи ", "выключи ", "открой ", "закрой ", "поставь ", "напомни ",
+        "найди ", "покажи ", "скажи ", "сделай ", "запусти ", "переключи ",
+        "подбрось ", "брось ", "кинь ", "посчитай ", "переведи ", "установи ",
+        "проверь ", "убери ", "добавь ", "запиши ", "прочитай ", "сверни ",
+        "разверни ", "создай ", "напиши ", "позвони ", "включись ", "выключись ",
+    )
 
-    @classmethod
-    def _looks_like_command(cls, text: str) -> bool:
-        return len((text or "").strip()) >= cls._MIN_COMMAND_CHARS
+    def _looks_like_command(self, text: str) -> bool:
+        normalized = normalize_command_text(text)
+        if len(normalized) < self._MIN_COMMAND_CHARS:
+            return False
+        if self.match_intent(normalized)[0] is not None:
+            return True
+        if " " not in normalized:
+            return False
+        return normalized.startswith(self._QUESTION_PREFIXES + self._IMPERATIVE_PREFIXES)
+
+    @staticmethod
+    def _is_plausible_phrase(text: str) -> bool:
+        """Похоже ли на осмысленную фразу, а не на шум распознавания.
+
+        Два и более слова, хотя бы одно длиннее трёх букв. Отсекает «ну да»,
+        «ага да», но пропускает «включи музыку» и «подбрось кости».
+        """
+        words = normalize_command_text(text).split()
+        return len(words) >= 2 and any(len(word) >= 4 for word in words)
 
     def _acknowledge_wake(self) -> None:
         """Отклик на обращение: «Да, сэр?».
@@ -1083,13 +1124,27 @@ class Jarvis:
         if self._looks_like_command(command):
             return command
 
+        # Вместе с обращением прозвучала осмысленная, но незнакомая фраза
+        # («Джарвис, подбрось кости»). Заставлять повторять её бессмысленно —
+        # отдаём нейросети как свободную просьбу. Совсем короткие «ну да»
+        # отсеиваем: это шум, а не команда.
+        if self._is_plausible_phrase(command):
+            log(f"Незнакомая команда, отдаю нейросети: «{command}»", "debug")
+            return command
+
         # Прозвучало только «Джарвис» — откликаемся и слушаем команду.
         self._acknowledge_wake()
-        command = self._listen_command()
+        # Команду после отклика тоже очищаем от обращения: пользователь часто
+        # повторяет «Джарвис, ...» целиком, и раньше такая фраза не совпадала
+        # ни с одной командой — ассистент отвечал «не расслышал».
+        command = self._strip_wake_word(self._listen_command(start_timeout_sec=8.0)).strip()
         if not self._looks_like_command(command):
-            # Распознался шум («ну», «да») — не отправляем его в веб-поиск,
-            # а возвращаемся к ожиданию обращения.
-            log("Команду не расслышал.", "info")
+            if self._is_plausible_phrase(command):
+                log(f"Незнакомая команда, отдаю нейросети: «{command}»", "debug")
+                return command
+            # Распознался шум («ну», «да») или команда не прозвучала — не
+            # отправляем это в веб-поиск, а возвращаемся к ожиданию обращения.
+            log("Команду не понял." if command else "Команда не прозвучала.", "info")
             return ""
         return command
 
@@ -1117,10 +1172,13 @@ class Jarvis:
     def run(self) -> None:
         self._set_process_title()
         self._print_banner()
+        # Голос Piper грузится около двух секунд: поднимаем его в фоне, пока
+        # идёт калибровка микрофона, чтобы приветствие не ждало загрузку.
+        self.speaker.warmup()
 
-        # Без микрофона или Whisper голосовой режим невозможен — уходим в текст.
+        # Без микрофона или Vosk голосовой режим невозможен — уходим в текст.
         if self.mode != "text" and not self._voice_available():
-            log("Голосовой ввод недоступен (нет sounddevice или faster-whisper) — "
+            log("Голосовой ввод недоступен (нет sounddevice или vosk) — "
                 "перехожу в текстовый режим.", "warn")
             self.mode = "text"
 

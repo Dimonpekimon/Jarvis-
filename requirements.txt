@@ -1,4 +1,4 @@
-# Джарвис v3.0 — зависимости
+# Джарвис v3.1 — зависимости
 # Установка:  pip install -r requirements.txt
 
 # --- Ядро ---
@@ -6,10 +6,11 @@ numpy>=2.0
 requests>=2.31
 sounddevice>=0.4.6
 
-# --- Распознавание речи (Whisper) ---
-faster-whisper>=1.0
+# --- Распознавание речи (Vosk, локально) ---
+vosk>=0.3.45
 
-# --- Синтез речи ---
+# --- Синтез речи (Piper — основной, офлайн) ---
+piper-tts>=1.2
 edge-tts>=7.0
 pyttsx3>=2.90
 pywin32>=306
@@ -35,6 +36,5 @@ winrt-Windows.Foundation
 winrt-Windows.Foundation.Collections
 
 # --- Опционально ---
-piper-tts>=1.2                # локальный голос без интернета
 python-telegram-bot>=21.0     # управление Джарвисом с телефона
 # pytesseract>=0.3.10         # альтернативный OCR (нужен ещё Tesseract OCR)

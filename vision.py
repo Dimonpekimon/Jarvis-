@@ -5,15 +5,15 @@
 (``Windows.Media.Ocr``) — ничего скачивать не нужно, русский язык поддерживается
 системным языковым пакетом. Если движок недоступен, используется ``pytesseract``.
 
-Анализ картинки целиком (а не только текста) требует мультимодальной модели
-в Ollama — она задаётся в настройке ``OLLAMA_VISION_MODEL``.
+Анализ картинки целиком (а не только текста) идёт через мультимодальную
+модель Gemini — она задаётся в настройке ``GEMINI_VISION_MODEL``.
 
-.. warning::
-   Импорт ``winrt`` обязан происходить ПОСЛЕ создания модели faster-whisper.
-   Если winrt загрузился первым, последующая загрузка модели валит процесс
-   сегфолтом (проверено: код возврата 139). Поэтому ядро вызывает
-   ``Jarvis._warm_recognizer()`` перед любым обращением к OCR — не убирайте
-   этот вызов.
+.. note::
+   Импорт ``winrt`` по-прежнему делается ПОСЛЕ инициализации распознавателя.
+   Раньше обратный порядок ронял загрузку faster-whisper сегфолтом; сейчас
+   распознавание работает на Vosk, но ядро всё равно вызывает
+   ``Jarvis._warm_recognizer()`` перед любым обращением к OCR — так первая
+   команда не ждёт загрузку модели.
 """
 
 from __future__ import annotations
@@ -143,8 +143,8 @@ class Vision:
             return ("Распознавание текста недоступно: установите компонент Windows OCR "
                     "(pip install winrt-Windows.Media.Ocr winrt-Windows.Storage "
                     "winrt-Windows.Storage.Streams winrt-Windows.Graphics.Imaging "
-                    "winrt-Windows.Globalization winrt-Windows.Foundation) "
-                    "или задайте OLLAMA_VISION_MODEL для анализа картинки.")
+                    "winrt-Windows.Globalization winrt-Windows.Foundation). "
+                    "А сказать «что на экране» — я разберу картинку целиком.")
         return "Не нашёл текст на экране, сэр."
 
     def analyze(self, question: str = "") -> str:
@@ -154,7 +154,7 @@ class Vision:
         if path is None:
             return "Не удалось сделать скриншот — установите Pillow: pip install pillow"
 
-        # 1. Полноценный анализ картинки мультимодальной моделью.
+        # 1. Полноценный анализ картинки мультимодальной моделью Gemini.
         if self.brain.vision_available():
             try:
                 return self.brain.ask_with_image(question, path)
@@ -173,10 +173,10 @@ class Vision:
             except BrainUnavailable as exc:
                 return f"{exc} Текст с экрана: {text[:400]}"
 
-        if config.OLLAMA_VISION_MODEL:
+        if config.GEMINI_VISION_MODEL:
             return (f"Скриншот сохранён в {path}. Модель "
-                    f"«{config.OLLAMA_VISION_MODEL}» не установлена: "
-                    f"выполните ollama pull {config.OLLAMA_VISION_MODEL}")
+                    f"«{config.GEMINI_VISION_MODEL}» сейчас недоступна: "
+                    "проверьте ключ Gemini и интернет.")
         return (f"Скриншот сохранён в {path}, но текста на нём я не нашёл. "
-                "Чтобы я мог описывать картинки, задайте OLLAMA_VISION_MODEL "
-                "(например «llava») и выполните ollama pull llava.")
+                "Чтобы я мог описывать картинки, задайте GEMINI_VISION_MODEL "
+                "(например «gemini-3.5-flash»).")

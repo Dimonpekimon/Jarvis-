@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Конфигурация Джарвиса v3.0.
+"""Конфигурация Джарвиса v3.2.
 
 Все параметры ниже можно переопределить в файле ``jarvis_settings.json``
 (он создаётся автоматически при первом запуске рядом с этим модулем).
 Формат — обычный JSON, ключи совпадают с именами констант::
 
     {
-        "WHISPER_MODEL": "medium",
+        "VOSK_MODEL_NAME": "vosk-model-small-ru-0.22",
         "TTS_VOICE": "ru-RU-SvetlanaNeural",
-        "OLLAMA_MODEL": "mistral"
+        "GEMINI_MODEL": "gemini-3.5-flash"
     }
 
 Файл читается при импорте модуля, поэтому менять настройки нужно до запуска.
@@ -57,6 +57,8 @@ WAKE_WORD_REQUIRED = True           # в голосовом режиме жда�
 VERBOSE = False                     # подробный лог
 BACKGROUND_MODE = False             # фоновый запуск без консоли (ярлык на рабочем столе)
 LOG_TO_FILE = False                 # дублировать лог в data/jarvis.log (в фоне — да)
+LOG_MAX_BYTES = 1_000_000           # ротация лога: размер одного файла
+LOG_BACKUP_COUNT = 3                # сколько архивов .1 ... .N хранить
 THINKING_FILLER = True              # говорить «секунду, сэр» перед сетевыми командами
 
 # =====================================================================
@@ -83,48 +85,64 @@ WAKE_SILENCE_SEC = 0.6              # тишина, завершающая фр�
 WAKE_ACK_ENABLED = True
 
 # =====================================================================
-#  WHISPER — РАСПОЗНАВАНИЕ РЕЧИ (faster-whisper)
+#  VOSK — РАСПОЗНАВАНИЕ РЕЧИ (локально, офлайн)
 # =====================================================================
-WHISPER_MODEL = "small"             # tiny | base | small | medium | large-v3
-WHISPER_DEVICE = "cpu"              # cpu | cuda
-WHISPER_COMPUTE_TYPE = "int8"       # int8 (cpu) | int8_float16 | float16 (gpu)
-WHISPER_LANGUAGE = "ru"             # "ru" или None (автоопределение)
-WHISPER_BEAM_SIZE = 1               # 1 — быстро, 5 — точнее
-WHISPER_VAD_FILTER = True           # встроенный фильтр тишины Whisper
-WHISPER_NO_SPEECH_THRESHOLD = 0.6   # порог «это не речь» (выше = строже)
-WHISPER_CONDITION_ON_PREVIOUS = False
-WHISPER_INITIAL_PROMPT = (
-    "Джарвис, погода, громкость, яркость, скриншот, напоминание, "
-    "ютуб, стим, вскод, терминал, браузер."
-)
+# Небольшая русская модель (~45 МБ) распознаёт за доли секунды на CPU и не
+# требует ни GPU, ни интернета после первого скачивания. Если папки модели
+# нет, speech.py скачает и распакует её автоматически.
+VOSK_MODEL_NAME = "vosk-model-small-ru-0.22"
+VOSK_MODEL_PATH = MODELS_DIR / VOSK_MODEL_NAME
+VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
+VOSK_AUTO_DOWNLOAD = True           # скачивать модель при первом запуске
+VOSK_SAMPLE_RATE = SAMPLE_RATE      # Vosk ждёт 16 кГц моно int16
+VOSK_WORDS = True                   # возвращать тайминги и уверенность слов
 
 # =====================================================================
-#  TTS — СИНТЕЗ РЕЧИ
+#  TTS — СИНТЕЗ РЕЧИ (Piper — локально, офлайн)
 # =====================================================================
-TTS_ENGINE = "auto"                 # auto | edge | piper | sapi
-TTS_VOICE = "ru-RU-DmitryNeural"    # голос edge-tts
+# Основной движок — Piper: нейронный голос работает без интернета, ничего не
+# отправляет в облако и не зависит от доступности серверов Microsoft.
+# edge-tts и SAPI остаются резервом, если модель Piper недоступна.
+TTS_ENGINE = "piper"                # piper | edge | sapi | auto
+TTS_VOICE = "ru-RU-DmitryNeural"    # голос edge-tts (резервный движок)
 TTS_RATE = "+10%"                   # скорость edge-tts ("+20%" / "-10%")
 TTS_VOLUME = "+0%"                  # громкость edge-tts
 TTS_PITCH = "+0Hz"                  # тон edge-tts
 TTS_USE_CACHE = True                # кэшировать синтезированные фразы
+TTS_CACHE_MAX_FILES = 100            # ограничение числа файлов в кэше
+TTS_CACHE_TTL_DAYS = 30              # удалять файлы кэша старше этого срока
 
 PIPER_MODEL = VOICES_DIR / "ru_RU-dmitri-medium.onnx"
-PIPER_SPEED = 1.0
+# Откуда скачать голос, если модели ещё нет (HuggingFace, rhasspy/piper-voices).
+PIPER_MODEL_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/ru/ru_RU/"
+    "dmitri/medium/ru_RU-dmitri-medium.onnx"
+)
+PIPER_CONFIG_URL = PIPER_MODEL_URL + ".json"
+PIPER_AUTO_DOWNLOAD = True          # скачивать голос при первом запуске
+PIPER_SPEED = 1.0                   # 1.0 — обычная, 1.2 — быстрее
+PIPER_VOLUME = 1.0                  # 0.0..1.0
 
 SAPI_RATE = 185                     # pyttsx3 (SAPI5) — офлайн-резерв
 SAPI_VOLUME = 1.0
 
 # =====================================================================
-#  LLM — МОЗГ (Ollama)
+#  LLM — МОЗГ (Gemini API, бесплатный тариф)
 # =====================================================================
-OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
-OLLAMA_MODEL = "mistral"            # mistral | llama3.2 | qwen2.5 | gemma2 ...
-OLLAMA_VISION_MODEL = ""            # напр. "llama3.2-vision" или "llava" (пусто = выкл.)
-OLLAMA_TIMEOUT = 90                 # сек
-OLLAMA_MAX_TOKENS = 250
-OLLAMA_TEMPERATURE = 0.6
-OLLAMA_KEEP_ALIVE = "10m"           # держать модель в памяти
-OLLAMA_RECHECK_SEC = 30             # как часто перепроверять недоступную Ollama
+# Ключ можно задать здесь, в jarvis_settings.json (ключ GEMINI_API_KEY) или
+# переменной окружения GEMINI_API_KEY. В репозиторий ключ не попадает.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_MODEL = "gemini-3.5-flash"       # основная модель для диалога
+GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash-lite"]   # если основная занята
+GEMINI_VISION_MODEL = "gemini-3.5-flash"  # анализ скриншотов ("" = выкл.)
+GEMINI_TIMEOUT = 30                 # сек на один запрос
+GEMINI_MAX_TOKENS = 500             # с запасом: ответ озвучивается целиком
+GEMINI_TEMPERATURE = 0.6
+# 0 — не тратить токены и время на «размышления». Модели, которые этот
+# параметр не поддерживают, получают запрос без него (brain.py повторяет).
+GEMINI_THINKING_BUDGET = 0
+GEMINI_RECHECK_SEC = 30             # как часто перепроверять ключ при ошибке
 LLM_HISTORY_SIZE = 8                # сколько пар «вопрос-ответ» помнить
 
 LLM_SYSTEM_PROMPT = (
@@ -139,6 +157,9 @@ LLM_SYSTEM_PROMPT = (
 #  ВЕБ-ПОИСК И ПОГОДА
 # =====================================================================
 WEB_SEARCH_RESULTS = 3
+# Поиск выполняется только по явной команде «найди ...». Неизвестная шумовая
+# реплика при недоступной нейросети не должна внезапно зачитывать статью из сети.
+LLM_OFFLINE_WEB_FALLBACK = False
 WEATHER_DEFAULT_CITY = "Москва"
 WEATHER_TIMEOUT = 6
 WEATHER_DEADLINE = 8.0              # общий лимит на поиск города, сек
@@ -203,20 +224,22 @@ APPS = {
 # =====================================================================
 _TUNABLE = [
     "DEFAULT_INPUT_MODE", "ENABLE_TTS", "WAKE_WORD_REQUIRED", "VERBOSE",
-    "BACKGROUND_MODE", "LOG_TO_FILE", "THINKING_FILLER",
+    "BACKGROUND_MODE", "LOG_TO_FILE", "LOG_MAX_BYTES", "LOG_BACKUP_COUNT", "THINKING_FILLER",
     "SAMPLE_RATE", "CHANNELS", "CHUNK_MS", "WAKE_WINDOW_SEC", "MAX_COMMAND_SEC",
     "SILENCE_SEC", "MIN_SPEECH_SEC", "VAD_RMS_THRESHOLD", "MIC_CALIBRATION_SEC",
     "MIC_CLEAR_GUARD", "WAKE_WORDS", "WAKE_WORD_CUTOFF", "WAKE_SILENCE_SEC",
     "WAKE_ACK_ENABLED",
-    "WHISPER_MODEL", "WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE", "WHISPER_LANGUAGE",
-    "WHISPER_BEAM_SIZE", "WHISPER_VAD_FILTER", "WHISPER_INITIAL_PROMPT",
+    "VOSK_MODEL_NAME", "VOSK_MODEL_PATH", "VOSK_MODEL_URL", "VOSK_AUTO_DOWNLOAD",
+    "VOSK_SAMPLE_RATE", "VOSK_WORDS",
     "TTS_ENGINE", "TTS_VOICE", "TTS_RATE", "TTS_VOLUME", "TTS_PITCH", "TTS_USE_CACHE",
-    "PIPER_MODEL", "PIPER_SPEED", "SAPI_RATE", "SAPI_VOLUME",
-    "OLLAMA_HOST", "OLLAMA_MODEL", "OLLAMA_VISION_MODEL", "OLLAMA_TIMEOUT",
-    "OLLAMA_MAX_TOKENS", "OLLAMA_TEMPERATURE", "OLLAMA_KEEP_ALIVE",
-    "OLLAMA_RECHECK_SEC",
+    "TTS_CACHE_MAX_FILES", "TTS_CACHE_TTL_DAYS",
+    "PIPER_MODEL", "PIPER_MODEL_URL", "PIPER_CONFIG_URL", "PIPER_AUTO_DOWNLOAD",
+    "PIPER_SPEED", "PIPER_VOLUME", "SAPI_RATE", "SAPI_VOLUME",
+    "GEMINI_API_KEY", "GEMINI_API_BASE", "GEMINI_MODEL", "GEMINI_FALLBACK_MODELS",
+    "GEMINI_VISION_MODEL", "GEMINI_TIMEOUT", "GEMINI_MAX_TOKENS",
+    "GEMINI_TEMPERATURE", "GEMINI_THINKING_BUDGET", "GEMINI_RECHECK_SEC",
     "LLM_HISTORY_SIZE", "LLM_SYSTEM_PROMPT",
-    "WEB_SEARCH_RESULTS", "WEATHER_DEFAULT_CITY", "WEATHER_DEADLINE",
+    "WEB_SEARCH_RESULTS", "LLM_OFFLINE_WEB_FALLBACK", "WEATHER_DEFAULT_CITY", "WEATHER_DEADLINE",
     "OCR_LANGUAGE", "SCREENSHOT_DIR", "COMMANDS_FILE", "PROCESS_TITLE",
     "WEB_UI_ENABLED", "WEB_UI_HOST", "WEB_UI_PORT", "WEB_UI_OPEN_BROWSER",
     "TELEGRAM_ENABLED", "TELEGRAM_TOKEN", "TELEGRAM_ALLOWED_USERS",
@@ -224,7 +247,7 @@ _TUNABLE = [
 ]
 
 _STRING_PATHS = {"PIPER_MODEL", "SCREENSHOT_DIR", "NOTES_FILE", "REMINDERS_FILE",
-                 "COMMANDS_FILE"}
+                 "COMMANDS_FILE", "VOSK_MODEL_PATH"}
 
 
 def _load_settings() -> dict:
@@ -289,7 +312,7 @@ def _has(module_name: str) -> bool:
 FEATURES = {
     "sounddevice": _has("sounddevice"),
     "numpy": _has("numpy"),
-    "faster_whisper": _has("faster_whisper"),
+    "vosk": _has("vosk"),
     "edge_tts": _has("edge_tts"),
     "piper": _has("piper"),
     "pyttsx3": _has("pyttsx3"),
@@ -312,7 +335,7 @@ def feature_report() -> list:
     labels = {
         "sounddevice": "Микрофон (sounddevice)",
         "numpy": "Численные расчёты (numpy)",
-        "faster_whisper": "Распознавание речи (faster-whisper)",
+        "vosk": "Распознавание речи (Vosk)",
         "edge_tts": "Нейронный голос (edge-tts)",
         "piper": "Офлайн-голос (piper)",
         "pyttsx3": "Резервный голос (pyttsx3/SAPI)",

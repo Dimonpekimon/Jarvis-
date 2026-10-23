@@ -45,10 +45,31 @@ def log(message: str, level: str = "info", *, end: str = "\n", flush: bool = Tru
         log_to_file(f"[{level}] {message}")
 
 
+def _rotate_log(path: Path) -> None:
+    """Ротирует журнал до записи, не давая фоновому логу расти бесконечно."""
+    max_bytes = max(0, int(getattr(config, "LOG_MAX_BYTES", 0) or 0))
+    backups = max(0, int(getattr(config, "LOG_BACKUP_COUNT", 0) or 0))
+    if not max_bytes or not path.exists() or path.stat().st_size < max_bytes:
+        return
+    if not backups:
+        path.unlink(missing_ok=True)
+        return
+    oldest = path.with_name(f"{path.name}.{backups}")
+    oldest.unlink(missing_ok=True)
+    for index in range(backups - 1, 0, -1):
+        source = path.with_name(f"{path.name}.{index}")
+        if source.exists():
+            source.replace(path.with_name(f"{path.name}.{index + 1}"))
+    path.replace(path.with_name(f"{path.name}.1"))
+
+
 def log_to_file(message: str) -> None:
-    """Дублирует важное сообщение в data/jarvis.log."""
+    """Дублирует сообщение в data/jarvis.log с ограниченной ротацией."""
     try:
-        with open(config.LOG_FILE, "a", encoding="utf-8") as f:
+        path = Path(config.LOG_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_log(path)
+        with open(path, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().isoformat(timespec='seconds')} {message}\n")
     except OSError:
         pass
@@ -105,7 +126,7 @@ def normalize_audio(audio, target_peak: float = 0.85, max_gain: float = 8.0):
 
 
 def to_float32(audio):
-    """int16 PCM -> float32 в диапазоне [-1, 1] (формат для Whisper)."""
+    """int16 PCM -> float32 в диапазоне [-1, 1] (формат для распознавания)."""
     import numpy as np
 
     data = np.asarray(audio)
@@ -142,15 +163,35 @@ def write_json(path: Path, data) -> bool:
 #  ТЕКСТ
 # =====================================================================
 _PUNCT_RE = re.compile(r"[^\w\s+\-*/^().,=]", re.UNICODE)
+_COMMAND_PUNCT_RE = re.compile(r"[^\w\s-]", re.UNICODE)
 _SPACE_RE = re.compile(r"\s+")
 
 
 def normalize_text(text: str) -> str:
-    """Приводит фразу к виду, удобному для сопоставления с командами."""
+    """Нормализует выражение, сохраняя математические символы.
+
+    Используется только там, где ``.``, ``,`` и скобки имеют смысл: калькулятор,
+    проценты и интервалы. Для маршрутизации команд и имён городов используйте
+    :func:`normalize_command_text`.
+    """
     if not text:
         return ""
     text = text.lower().replace("ё", "е")
     text = _PUNCT_RE.sub(" ", text)
+    return _SPACE_RE.sub(" ", text).strip()
+
+
+def normalize_command_text(text: str) -> str:
+    """Нормализует разговорную фразу без пунктуации.
+
+    Точка в конце реплики не должна становиться частью города (``Минске.``)
+    или мешать совпадению стоп-слов (``погода.``). Математика этим путём не
+    проходит, поэтому десятичные разделители и скобки здесь намеренно удалены.
+    """
+    if not text:
+        return ""
+    text = text.lower().replace("ё", "е")
+    text = _COMMAND_PUNCT_RE.sub(" ", text)
     return _SPACE_RE.sub(" ", text).strip()
 
 

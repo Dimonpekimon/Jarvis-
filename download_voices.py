@@ -36,8 +36,8 @@ VOICES = {
         "path": "denis/medium/ru_RU-denis-medium",
     },
     "ruslan": {
-        "title": "Руслан (мужской, высокое качество)",
-        "path": "ruslan/high/ru_RU-ruslan-medium",
+        "title": "Руслан (мужской, среднее качество)",
+        "path": "ruslan/medium/ru_RU-ruslan-medium",
     },
 }
 

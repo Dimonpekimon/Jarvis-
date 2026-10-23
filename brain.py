@@ -1,14 +1,19 @@
 # -*- coding: utf-8 -*-
-"""«Мозг» Джарвиса — локальная LLM через Ollama.
+"""«Мозг» Джарвиса — бесплатный Gemini API.
 
-По умолчанию используется модель ``mistral`` (7B), но в настройках можно указать
-любую другую: ``llama3.2``, ``qwen2.5``, ``gemma2`` и т.д. Для анализа
-скриншотов можно дополнительно указать ``OLLAMA_VISION_MODEL``.
+По умолчанию используется модель ``gemini-3.5-flash``: она быстро отвечает
+по-русски, понимает картинки и доступна на бесплатном тарифе. Модель задаётся
+настройкой ``GEMINI_MODEL``, список запасных — ``GEMINI_FALLBACK_MODELS``.
+
+Ключ берётся из ``jarvis_settings.json`` (ключ ``GEMINI_API_KEY``) или из
+переменной окружения ``GEMINI_API_KEY``. В репозиторий ключ не попадает.
 """
 
 from __future__ import annotations
 
 import base64
+import io
+import mimetypes
 import re
 import time
 from collections import deque
@@ -30,6 +35,11 @@ _MARKDOWN_PATTERNS = [
     (re.compile(r"\[(.+?)\]\(.+?\)"), r"\1"),
 ]
 
+# Картинку больше этого размера отправлять накладно: запрос получается
+# тяжёлым, а бесплатный тариф считает входные токены. Уменьшаем перед отправкой.
+_MAX_INLINE_IMAGE_BYTES = 3_500_000
+_MAX_IMAGE_SIDE = 1600
+
 
 def plain_text(text: str) -> str:
     """Убирает markdown, чтобы синтезатор не читал звёздочки и решётки."""
@@ -41,56 +51,117 @@ def plain_text(text: str) -> str:
 
 
 class BrainUnavailable(RuntimeError):
-    """Ollama недоступна (не запущена или не установлена)."""
+    """Gemini недоступна: нет ключа, нет сети или исчерпан лимит."""
+
+
+class _TryNextModel(RuntimeError):
+    """Внутренний сигнал: эта модель не подошла, есть смысл взять запасную."""
 
 
 class Brain:
     def __init__(self, model: str | None = None):
-        self.model = model or config.OLLAMA_MODEL
-        self.host = config.OLLAMA_HOST.rstrip("/")
+        self.model = model or config.GEMINI_MODEL
+        self.api_base = str(config.GEMINI_API_BASE).rstrip("/")
         self.history: deque = deque(maxlen=config.LLM_HISTORY_SIZE)
         self._session = requests.Session()
-        # Ollama всегда локальная: игнорируем системный HTTP_PROXY, иначе запрос
-        # к 127.0.0.1 уходит в прокси и падает с 502.
-        self._session.trust_env = False
+        # Gemini — внешний сервис, поэтому системный прокси здесь как раз нужен
+        # (в отличие от прежней локальной Ollama, где он всё ломал).
+        self._session.trust_env = True
         self._available: bool | None = None
         self._models: list = []
-        # Когда Ollama недоступна, не тратим время на заведомо провальное
-        # подключение: на части систем закрытый порт отвечает только через ~2 с.
         self._probe_after = 0.0
         self._last_error = ""
+        # Некоторые модели (например, flash-lite) не принимают thinkingConfig.
+        # После первого отказа запоминаем это и больше не мешаем запрос.
+        self._thinking_supported = True
 
     # ------------------------------------------------------------------
-    #  Доступность
+    #  Ключ и доступность
     # ------------------------------------------------------------------
+    @property
+    def api_key(self) -> str:
+        return str(getattr(config, "GEMINI_API_KEY", "") or "").strip()
+
+    def key_present(self) -> bool:
+        return bool(self.api_key)
+
+    def _require_key(self) -> str:
+        key = self.api_key
+        if not key:
+            raise BrainUnavailable(
+                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в jarvis_settings.json "
+                "или задайте переменную окружения GEMINI_API_KEY."
+            )
+        return key
+
     def available_models(self, force: bool = False) -> list:
-        """Список моделей Ollama. Результат кэшируется на OLLAMA_RECHECK_SEC.
-
-        Без кэша каждая нераспознанная фраза заново ждала бы недоступную Ollama
-        (около 2 с), а потом всё равно уходила в веб-поиск. ``force=True`` —
-        для настоящей диагностики (ключ --check).
-        """
+        """Список моделей, доступных этому ключу. Кэшируется на GEMINI_RECHECK_SEC."""
+        if not self.key_present():
+            self._available = False
+            self._models = []
+            self._last_error = (
+                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в jarvis_settings.json."
+            )
+            return []
         if (not force and self._available is not None
                 and time.monotonic() < self._probe_after):
             return self._models
         try:
-            response = self._session.get(f"{self.host}/api/tags", timeout=5)
-            response.raise_for_status()
-            payload = response.json()
+            response = self._session.get(
+                f"{self.api_base}/models",
+                params={"key": self.api_key},
+                timeout=10,
+            )
         except Exception as exc:  # noqa: BLE001
             self._available = False
             self._models = []
             self._last_error = (
-                f"Ollama не отвечает ({exc.__class__.__name__}). Установите её с "
-                "https://ollama.com/download и запустите."
+                f"Нет связи с Gemini ({exc.__class__.__name__}). "
+                "Проверьте интернет и прокси."
             )
-            recheck = float(getattr(config, "OLLAMA_RECHECK_SEC", 30) or 30)
-            self._probe_after = time.monotonic() + recheck
+            self._schedule_recheck()
             return []
+
+        if response.status_code in (400, 401, 403):
+            self._available = False
+            self._models = []
+            self._last_error = (
+                "Ключ Gemini неверный или отозван. Получите новый в Google AI Studio "
+                "и обновите GEMINI_API_KEY."
+            )
+            self._schedule_recheck()
+            return []
+        if response.status_code >= 400:
+            self._available = False
+            self._models = []
+            self._last_error = f"Gemini вернула ошибку {response.status_code}."
+            self._schedule_recheck()
+            return []
+
+        try:
+            payload = response.json()
+        except ValueError:
+            self._available = False
+            self._models = []
+            self._last_error = "Gemini вернула некорректный ответ."
+            self._schedule_recheck()
+            return []
+
+        self._models = [
+            str(item.get("name", "")).removeprefix("models/")
+            for item in payload.get("models", [])
+            if "generateContent" in (item.get("supportedGenerationMethods") or [])
+        ]
         self._available = True
         self._last_error = ""
-        self._models = [m.get("name", "") for m in payload.get("models", [])]
+        # Успешный ответ тоже кэшируем: иначе каждое «статус» заново ходило бы
+        # в сеть за списком моделей (проверка занимала ~0,1–0,2 с на вызов).
+        self._schedule_recheck()
         return self._models
+
+    def _schedule_recheck(self) -> None:
+        recheck = float(getattr(config, "GEMINI_RECHECK_SEC", 30) or 30)
+        self._probe_after = time.monotonic() + recheck
 
     def is_available(self) -> bool:
         if self._available is None:
@@ -100,44 +171,34 @@ class Brain:
     def model_present(self) -> bool:
         if not self._models:
             self.available_models()
-        base = self.model.split(":")[0]
-        return any(name.split(":")[0] == base for name in self._models)
+        return self.model in self._models
 
     def check(self, force: bool = False) -> tuple:
-        """Возвращает (ок: bool, сообщение: str) — для стартовой диагностики.
-
-        По умолчанию пользуется кэшем: команда «статус» не должна каждый раз
-        ждать недоступную Ollama. Для настоящей проверки — ``force=True``.
-        """
+        """Возвращает (ок: bool, сообщение: str) — для стартовой диагностики."""
+        if not self.key_present():
+            return False, (
+                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в jarvis_settings.json "
+                "или задайте переменную окружения GEMINI_API_KEY."
+            )
         models = self.available_models(force=force)
         if not models:
+            return False, self._last_error or "Gemini не отвечает."
+        if self.model not in models:
+            preview = ", ".join(models[:5]) or "нет"
             return False, (
-                "Ollama не отвечает. Установите её с https://ollama.com/download "
-                f"и запустите, затем выполните: ollama pull {self.model}"
+                f"Модель «{self.model}» недоступна для этого ключа. "
+                f"Доступны, например: {preview}."
             )
-        if not self.model_present():
-            return False, (
-                f"Модель «{self.model}» не найдена. Скачайте её командой: "
-                f"ollama pull {self.model}"
-            )
-        return True, f"Ollama готова, модель «{self.model}» на месте."
+        return True, f"Gemini готова, модель «{self.model}»."
 
     def warmup(self) -> bool:
-        """Загружает модель в память, чтобы первый ответ был быстрым."""
-        if not self.is_available() or not self.model_present():
-            return False
-        try:
-            self._session.post(
-                f"{self.host}/api/generate",
-                json={"model": self.model, "prompt": "привет", "stream": False,
-                      "options": {"num_predict": 1}, "keep_alive": config.OLLAMA_KEEP_ALIVE},
-                timeout=config.OLLAMA_TIMEOUT,
-            )
-            log(f"Модель «{self.model}» загружена в память.", "debug")
-            return True
-        except Exception as exc:  # noqa: BLE001
-            log(f"Прогрев модели не удался: {exc}", "debug")
-            return False
+        """Проверяет ключ и модель. Генерацию не запускает — не тратит квоту."""
+        ok, message = self.check()
+        if ok:
+            log(f"Мозг готов: {message}", "debug")
+        else:
+            log(message, "warn")
+        return ok
 
     # ------------------------------------------------------------------
     #  Диалог
@@ -145,72 +206,162 @@ class Brain:
     def reset(self) -> None:
         self.history.clear()
 
-    def _messages(self, prompt: str, image_b64: str | None = None) -> list:
-        messages = [{"role": "system", "content": config.LLM_SYSTEM_PROMPT}]
+    def _contents(self, prompt: str, image_b64: str | None = None,
+                  image_mime: str = "image/png") -> list:
+        contents = []
         for question, answer in self.history:
-            messages.append({"role": "user", "content": question})
-            messages.append({"role": "assistant", "content": answer})
-        user_message = {"role": "user", "content": prompt}
-        if image_b64:
-            user_message["images"] = [image_b64]
-        messages.append(user_message)
-        return messages
+            contents.append({"role": "user", "parts": [{"text": question}]})
+            contents.append({"role": "model", "parts": [{"text": answer}]})
 
-    def ask(self, prompt: str, *, remember: bool = True,
-            image_b64: str | None = None, model: str | None = None,
-            temperature: float | None = None) -> str:
-        """Отправляет запрос в Ollama и возвращает ответ.
+        parts: list = []
+        if prompt:
+            parts.append({"text": prompt})
+        if image_b64:
+            parts.append({"inline_data": {"mime_type": image_mime, "data": image_b64}})
+        contents.append({"role": "user", "parts": parts})
+        return contents
+
+    def _payload(self, prompt: str, *, image_b64: str | None,
+                 image_mime: str, temperature: float | None) -> dict:
+        payload: dict = {"contents": self._contents(prompt, image_b64, image_mime)}
+
+        system_prompt = str(getattr(config, "LLM_SYSTEM_PROMPT", "") or "").strip()
+        if system_prompt:
+            payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+
+        generation: dict = {
+            "temperature": (config.GEMINI_TEMPERATURE if temperature is None
+                            else float(temperature)),
+            "maxOutputTokens": int(config.GEMINI_MAX_TOKENS),
+        }
+        budget = getattr(config, "GEMINI_THINKING_BUDGET", None)
+        if budget is not None and self._thinking_supported:
+            generation["thinkingConfig"] = {"thinkingBudget": int(budget)}
+        payload["generationConfig"] = generation
+        return payload
+
+    def _post(self, model: str, payload: dict) -> dict:
+        """Один запрос к Gemini с понятными ошибками.
 
         Raises:
-            BrainUnavailable: если Ollama не запущена/не установлена.
+            _TryNextModel: модель не найдена или не ответила вовремя.
+            BrainUnavailable: проблема с ключом, лимитом или сетью.
         """
-        # Заведомо недоступную Ollama не дёргаем: подключение к закрытому порту
-        # может занимать секунды, а ответ всё равно придёт из веб-поиска.
-        if self._available is False and time.monotonic() < self._probe_after:
-            raise BrainUnavailable(
-                self._last_error or "Ollama недоступна. Проверьте, запущена ли она.")
-
-        target_model = model or self.model
-        payload = {
-            "model": target_model,
-            "messages": self._messages(prompt, image_b64),
-            "stream": False,
-            "keep_alive": config.OLLAMA_KEEP_ALIVE,
-            "options": {
-                "temperature": config.OLLAMA_TEMPERATURE if temperature is None else temperature,
-                "num_predict": config.OLLAMA_MAX_TOKENS,
-            },
-        }
+        key = self._require_key()
+        url = f"{self.api_base}/models/{model}:generateContent"
         try:
             response = self._session.post(
-                f"{self.host}/api/chat", json=payload, timeout=config.OLLAMA_TIMEOUT
+                url, params={"key": key}, json=payload,
+                timeout=float(config.GEMINI_TIMEOUT),
             )
-        except requests.exceptions.ConnectionError as exc:
-            self._available = False
-            raise BrainUnavailable(
-                "Ollama не запущена. Откройте терминал и выполните: ollama serve"
-            ) from exc
         except requests.exceptions.Timeout as exc:
-            raise BrainUnavailable(
-                f"Ollama не ответила за {config.OLLAMA_TIMEOUT} с. "
-                "Попробуйте модель поменьше или увеличьте OLLAMA_TIMEOUT."
+            raise _TryNextModel(
+                f"Модель «{model}» не ответила за {config.GEMINI_TIMEOUT} с."
             ) from exc
+        except requests.exceptions.RequestException as exc:
+            raise BrainUnavailable(
+                f"Нет связи с Gemini ({exc.__class__.__name__}). Проверьте интернет."
+            ) from exc
+
+        if response.status_code == 429:
+            # Бесплатный тариф считает запросы в минуту: короткая пауза помогает.
+            time.sleep(1.5)
+            try:
+                response = self._session.post(
+                    url, params={"key": key}, json=payload,
+                    timeout=float(config.GEMINI_TIMEOUT),
+                )
+            except requests.exceptions.RequestException as exc:
+                raise BrainUnavailable(
+                    f"Нет связи с Gemini ({exc.__class__.__name__})."
+                ) from exc
+            if response.status_code == 429:
+                raise BrainUnavailable(
+                    "Бесплатный лимит Gemini исчерпан. Подождите минуту и повторите."
+                )
 
         if response.status_code == 404:
-            raise BrainUnavailable(
-                f"Модель «{target_model}» не установлена. Выполните: ollama pull {target_model}"
-            )
-        if response.status_code >= 400:
-            raise BrainUnavailable(f"Ollama вернула ошибку {response.status_code}: {response.text[:200]}")
+            raise _TryNextModel(f"Модель «{model}» недоступна для этого ключа.")
+        if response.status_code in (400, 401, 403):
+            detail = _error_text(response)
+            # Часть моделей (flash-lite) не принимает thinkingConfig и отвечает
+            # просто «invalid argument». Повторяем без параметра — это безопасно:
+            # если дело было в другом, второй запрос вернёт ту же ошибку.
+            if (response.status_code == 400
+                    and "thinkingConfig" in payload.get("generationConfig", {})):
+                self._thinking_supported = False
+                log(f"«{model}» не приняла thinkingConfig — повторяю без него.",
+                    "debug")
+                retry_payload = dict(payload)
+                generation = dict(retry_payload["generationConfig"])
+                generation.pop("thinkingConfig", None)
+                retry_payload["generationConfig"] = generation
+                return self._post(model, retry_payload)
+            if response.status_code in (401, 403) or "api key" in detail.lower():
+                raise BrainUnavailable(
+                    "Ключ Gemini неверный или отозван. Обновите GEMINI_API_KEY."
+                )
+            raise BrainUnavailable(f"Gemini отклонила запрос: {detail}")
+        if response.status_code >= 500:
+            raise _TryNextModel(f"Сервис Gemini временно недоступен ({response.status_code}).")
 
         try:
-            data = response.json()
+            return response.json()
         except ValueError as exc:
-            raise BrainUnavailable("Ollama вернула некорректный ответ.") from exc
+            raise BrainUnavailable("Gemini вернула некорректный ответ.") from exc
 
-        answer = plain_text((data.get("message") or {}).get("content", ""))
+    def ask(self, prompt: str, *, remember: bool = True,
+            image_b64: str | None = None, image_mime: str = "image/png",
+            model: str | None = None, temperature: float | None = None) -> str:
+        """Отправляет запрос в Gemini и возвращает ответ.
+
+        Raises:
+            BrainUnavailable: нет ключа, сети, квоты или модель недоступна.
+        """
+        self._require_key()
+        if not prompt and not image_b64:
+            raise BrainUnavailable("Пустой запрос: нечего отправлять в Gemini.")
+
+        target = model or self.model
+        candidates = [target]
+        fallbacks = config.GEMINI_FALLBACK_MODELS or []
+        if isinstance(fallbacks, str):
+            # В настройках легко случайно указать строку вместо списка —
+            # иначе цикл пошёл бы по буквам и пробовал модели «g», «e», «m»...
+            fallbacks = [fallbacks]
+        for fallback in fallbacks:
+            if fallback and fallback not in candidates:
+                candidates.append(fallback)
+
+        last_error = ""
+        data = None
+        used_model = target
+        for candidate in candidates:
+            payload = self._payload(prompt, image_b64=image_b64,
+                                    image_mime=image_mime, temperature=temperature)
+            try:
+                data = self._post(candidate, payload)
+                used_model = candidate
+                break
+            except _TryNextModel as exc:
+                last_error = str(exc)
+                log(f"{exc} Пробую запасную модель.", "debug")
+
+        if data is None:
+            raise BrainUnavailable(
+                last_error or "Ни одна модель Gemini не ответила. Попробуйте позже."
+            )
+
+        answer = plain_text(_extract_text(data))
         if not answer:
-            answer = "Сэр, модель вернула пустой ответ."
+            reason = _block_reason(data)
+            if reason:
+                answer = f"Сэр, Gemini отклонила запрос: {reason}."
+            else:
+                answer = "Сэр, модель вернула пустой ответ."
+            log(f"Пустой ответ Gemini ({used_model}).", "warn")
+            return answer
+
         if remember:
             self.history.append((prompt, answer))
         return answer
@@ -220,22 +371,81 @@ class Brain:
     # ------------------------------------------------------------------
     @property
     def vision_enabled(self) -> bool:
-        return bool(config.OLLAMA_VISION_MODEL)
+        return bool(config.GEMINI_VISION_MODEL)
 
     def vision_available(self) -> bool:
-        if not self.vision_enabled:
-            return False
-        models = self.available_models()
-        base = config.OLLAMA_VISION_MODEL.split(":")[0]
-        return any(name.split(":")[0] == base for name in models)
+        return self.vision_enabled and self.key_present()
 
     def ask_with_image(self, prompt: str, image_path: Path) -> str:
         if not self.vision_enabled:
             raise BrainUnavailable(
                 "Модель для анализа изображений не задана. "
-                "Установите OLLAMA_VISION_MODEL, например «llava» "
-                "(ollama pull llava)."
+                "Укажите GEMINI_VISION_MODEL, например «gemini-3.5-flash»."
             )
-        image_b64 = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
-        return self.ask(prompt, image_b64=image_b64,
-                        model=config.OLLAMA_VISION_MODEL, remember=False)
+        image_b64, mime = _prepare_image(Path(image_path))
+        return self.ask(prompt, image_b64=image_b64, image_mime=mime,
+                        model=config.GEMINI_VISION_MODEL, remember=False)
+
+
+# =====================================================================
+#  Вспомогательные функции
+# =====================================================================
+def _error_text(response) -> str:
+    """Достаёт человекочитаемое сообщение из ответа об ошибке."""
+    try:
+        data = response.json()
+        message = str((data.get("error") or {}).get("message", ""))
+    except ValueError:
+        message = (response.text or "")[:200]
+    return message or f"ошибка {response.status_code}"
+
+
+def _extract_text(data: dict) -> str:
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return ""
+    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    chunks = []
+    for part in parts:
+        if part.get("thought"):
+            continue
+        text = part.get("text")
+        if text:
+            chunks.append(str(text))
+    return "".join(chunks).strip()
+
+
+def _block_reason(data: dict) -> str:
+    feedback = data.get("promptFeedback") or {}
+    reason = str(feedback.get("blockReason") or "")
+    if reason:
+        return reason
+    candidates = data.get("candidates") or []
+    if candidates:
+        finish = str(candidates[0].get("finishReason") or "")
+        if finish in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST"):
+            return finish
+    return ""
+
+
+def _prepare_image(image_path: Path) -> tuple[str, str]:
+    """Готовит картинку к отправке: при необходимости сжимает и уменьшает."""
+    data = Path(image_path).read_bytes()
+    mime = mimetypes.guess_type(str(image_path))[0] or "image/png"
+
+    if len(data) > _MAX_INLINE_IMAGE_BYTES:
+        try:
+            from PIL import Image
+
+            with Image.open(image_path) as image:
+                image = image.convert("RGB")
+                image.thumbnail((_MAX_IMAGE_SIDE, _MAX_IMAGE_SIDE))
+                buffer = io.BytesIO()
+                image.save(buffer, "JPEG", quality=85, optimize=True)
+            data = buffer.getvalue()
+            mime = "image/jpeg"
+            log(f"Скриншот сжат для отправки: {len(data) // 1024} КБ.", "debug")
+        except Exception as exc:  # noqa: BLE001
+            log(f"Не удалось сжать картинку: {exc}", "debug")
+
+    return base64.b64encode(data).decode("ascii"), mime

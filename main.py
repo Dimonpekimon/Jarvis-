@@ -44,7 +44,7 @@ if str(BASE_DIR) not in sys.path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jarvis",
-        description="Джарвис v3.0 — голосовой ассистент для Windows",
+        description="Джарвис v3.1 — голосовой ассистент для Windows",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--mode", choices=["text", "voice", "mixed"],
@@ -54,8 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-tts", action="store_true", help="отключить озвучку")
     parser.add_argument("--no-wake", action="store_true",
                         help="не требовать слово «Джарвис» перед командой")
-    parser.add_argument("--whisper-model",
-                        help="модель Whisper: tiny, base, small, medium, large-v3")
+    parser.add_argument("--vosk-model",
+                        help="папка или имя модели Vosk (по умолчанию из настроек)")
     parser.add_argument("--voice-name", help="голос edge-tts, например ru-RU-SvetlanaNeural")
     parser.add_argument("--telegram", action="store_true",
                         help="включить Telegram-бота (нужен TELEGRAM_TOKEN)")
@@ -95,14 +95,25 @@ def run_check() -> int:
 
     print("Конфигурация:")
     print(f"  Режим ввода:        {config.DEFAULT_INPUT_MODE}")
-    print(f"  Whisper:            {config.WHISPER_MODEL} "
-          f"({config.WHISPER_DEVICE}/{config.WHISPER_COMPUTE_TYPE})")
-    print(f"  Озвучка:            {config.TTS_ENGINE} / {config.TTS_VOICE}")
-    print(f"  LLM:                {config.OLLAMA_MODEL} @ {config.OLLAMA_HOST}")
+    print(f"  Распознавание:      Vosk «{config.VOSK_MODEL_NAME}»")
+    try:
+        from speech import model_path as vosk_model_path
+        vosk_ready = vosk_model_path().exists()
+    except Exception:  # noqa: BLE001
+        vosk_ready = config.VOSK_MODEL_PATH.exists()
+    print(f"  Модель на диске:    {'да' if vosk_ready else 'нет, скачается при запуске'}")
+    try:
+        from tts import piper_model_ready
+        piper_ready = piper_model_ready()
+    except Exception:  # noqa: BLE001
+        piper_ready = config.PIPER_MODEL.exists()
+    print(f"  Озвучка:            {config.TTS_ENGINE} / {Path(config.PIPER_MODEL).stem}")
+    print(f"  Голос Piper:        {'да' if piper_ready else 'нет, скачается при запуске'}")
+    print(f"  Нейросеть:          {config.GEMINI_MODEL} (Gemini API)")
     print(f"  Telegram:           {'включён' if config.TELEGRAM_ENABLED else 'выключен'}")
     print("-" * 64)
 
-    print("Ollama:")
+    print("Gemini (мозг):")
     try:
         from brain import Brain
         ok, message = Brain().check(force=True)
@@ -111,9 +122,12 @@ def run_check() -> int:
         print(f"  [ ] Не удалось проверить: {exc}")
     print("-" * 64)
 
+
     problems = []
-    if not config.FEATURES["faster_whisper"]:
-        problems.append("pip install faster-whisper   (распознавание речи)")
+    if not config.FEATURES["vosk"]:
+        problems.append("pip install vosk            (распознавание речи)")
+    if not config.FEATURES["piper"]:
+        problems.append("pip install piper-tts        (основная озвучка)")
     if not config.FEATURES["edge_tts"]:
         problems.append("pip install edge-tts          (нейронный голос)")
     if not config.FEATURES["sounddevice"]:
@@ -131,30 +145,42 @@ def run_check() -> int:
         print("Все основные компоненты на месте.")
 
     print()
-    print("Если Ollama ещё не установлена: https://ollama.com/download")
-    print(f"После установки выполните:  ollama pull {config.OLLAMA_MODEL}")
+    print("Ключ Gemini задаётся в jarvis_settings.json -> GEMINI_API_KEY.")
+    print("Бесплатный ключ можно получить в Google AI Studio: https://aistudio.google.com/apikey")
     return 0
 
 
 def run_list_voices() -> int:
+    """Показывает локальные голоса Piper и, если есть сеть, голоса edge-tts."""
     import config
-    import tts
+
+    try:
+        from download_voices import VOICES
+    except Exception:  # noqa: BLE001
+        VOICES = {}
+
+    if VOICES:
+        print("Русские голоса Piper (локальные, работают офлайн):")
+        for key, info in VOICES.items():
+            marker = " *" if Path(config.PIPER_MODEL).stem.startswith(
+                Path(info["path"]).name) else ""
+            print(f"  {key:<8} {info['title']}{marker}")
+        print("\nСкачать другой голос:  python download_voices.py irina")
+        print("Выбрать его:           PIPER_MODEL в jarvis_settings.json")
+        print("  * — выбран сейчас")
 
     if not config.FEATURES["edge_tts"]:
-        print("edge-tts не установлен: pip install edge-tts")
-        return 1
+        return 0
     try:
+        import tts
         voices = tts.list_edge_voices("ru")
     except Exception as exc:  # noqa: BLE001
-        print(f"Не удалось получить список голосов: {exc}")
-        return 1
-    if not voices:
-        print("Русские голоса не найдены (проверьте интернет).")
-        return 1
-    print("Доступные русские голоса edge-tts:")
-    for voice in voices:
-        print(f"  {voice['name']:<28} {voice['gender']}")
-    print("\nУкажите нужный в jarvis_settings.json -> TTS_VOICE")
+        print(f"\nГолоса edge-tts недоступны (резервный движок): {exc}")
+        return 0
+    if voices:
+        print("\nРусские голоса edge-tts (резерв, нужен интернет):")
+        for voice in voices:
+            print(f"  {voice['name']:<28} {voice['gender']}")
     return 0
 
 
@@ -185,8 +211,14 @@ def main() -> int:
         config.LOG_TO_FILE = True
     if args.verbose:
         config.VERBOSE = True
-    if args.whisper_model:
-        config.WHISPER_MODEL = args.whisper_model
+    if args.vosk_model:
+        candidate = Path(args.vosk_model)
+        # Голое имя модели («vosk-model-ru-0.42») ищем в data/models, а не в
+        # корне проекта: именно туда распаковываются модели.
+        if not candidate.is_absolute() and candidate.parent == Path("."):
+            candidate = config.MODELS_DIR / candidate
+        config.VOSK_MODEL_PATH = candidate
+        config.VOSK_MODEL_NAME = candidate.name
     if args.voice_name:
         config.TTS_VOICE = args.voice_name
     if args.telegram:

@@ -1,21 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Распознавание речи Джарвиса.
+"""Распознавание речи Джарвиса на Vosk.
 
 Запись звука — через ``sounddevice`` с VAD-детектором (останавливаемся, когда
-пользователь замолчал). Распознавание — локальный Whisper через
-``faster-whisper`` (модель скачивается один раз в ``data/models``).
+пользователь замолчал). Распознавание — локальный **Vosk**: небольшая русская
+модель (~45 МБ) работает на CPU за доли секунды и не требует интернета после
+первого скачивания. Модель кладётся в ``data/models`` и при отсутствии
+скачивается автоматически.
 """
 
 from __future__ import annotations
 
-import difflib
+import json
 import re
 import threading
 import time
+import urllib.request
+import zipfile
+from pathlib import Path
 
 import config
 from events import emit_level
-from utils import contains_word, log, normalize_audio, normalize_text, rms, to_float32
+from utils import contains_word, log, normalize_audio, normalize_command_text, rms
 
 try:
     import numpy as np
@@ -29,8 +34,8 @@ try:
 except ImportError:
     HAS_SD = False
 
-# Типичные «галлюцинации» Whisper на тишине и шуме — отбрасываем их.
-_HALLUCINATIONS = (
+# Типичные артефакты распознавания на тишине и шуме — отбрасываем их.
+_ARTIFACTS = (
     "продолжение следует",
     "субтитры",
     "редактор субтитров",
@@ -44,19 +49,137 @@ _HALLUCINATIONS = (
     "www",
 )
 
+_DOWNLOAD_CHUNK = 1 << 20          # 1 МБ
+_MODEL_MARKER = Path("conf") / "model.conf"
+
 
 class SpeechError(RuntimeError):
-    """Проблема с записью или распознаванием."""
+    """Проблема с записью, моделью или распознаванием."""
 
 
+# =====================================================================
+#  Модель Vosk
+# =====================================================================
+def model_path() -> Path:
+    """Путь к папке модели (относительный путь считается от папки проекта)."""
+    path = Path(config.VOSK_MODEL_PATH)
+    if not path.is_absolute():
+        path = config.BASE_DIR / path
+    return path
+
+
+def model_ready(path: Path | None = None) -> bool:
+    """Есть ли на диске распакованная модель."""
+    target = Path(path) if path else model_path()
+    return (target / _MODEL_MARKER).exists() or (target / "am" / "final.mdl").exists()
+
+
+def ensure_model(path: Path | None = None, *, allow_download: bool | None = None) -> Path:
+    """Возвращает папку модели, при необходимости скачивает и распаковывает её."""
+    target = Path(path) if path else model_path()
+    if model_ready(target):
+        return target
+
+    if allow_download is None:
+        allow_download = bool(getattr(config, "VOSK_AUTO_DOWNLOAD", True))
+    if not allow_download:
+        raise SpeechError(
+            f"Модель Vosk не найдена: {target}. Скачайте её вручную с "
+            f"{config.VOSK_MODEL_URL} и распакуйте в {target.parent}."
+        )
+
+    url = str(config.VOSK_MODEL_URL)
+    archive = config.MODELS_DIR / f"{target.name}.zip"
+    config.MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+    log(f"Скачиваю модель Vosk «{target.name}» (около 45 МБ)...", "info")
+    started = time.time()
+    try:
+        _download(url, archive)
+    except Exception as exc:  # noqa: BLE001
+        archive.unlink(missing_ok=True)
+        raise SpeechError(
+            f"Не удалось скачать модель Vosk: {exc}. Проверьте интернет или "
+            f"скачайте {url} вручную и распакуйте в {config.MODELS_DIR}."
+        ) from exc
+
+    log("Распаковываю модель Vosk...", "info")
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(config.MODELS_DIR)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise SpeechError(f"Архив модели Vosk повреждён: {exc}") from exc
+    finally:
+        archive.unlink(missing_ok=True)
+
+    if not model_ready(target):
+        # В архиве может быть одна вложенная папка с другим именем.
+        found = _find_model_dir(config.MODELS_DIR)
+        if found is not None:
+            target = found
+    if not model_ready(target):
+        raise SpeechError(
+            f"После распаковки модель Vosk не найдена в {config.MODELS_DIR}."
+        )
+
+    log(f"Модель Vosk готова за {time.time() - started:.1f} с: {target}", "info")
+    return target
+
+
+def _download(url: str, destination: Path) -> None:
+    """Скачивает файл с прогрессом в лог. Недокачанный файл не оставляем."""
+    partial = destination.with_suffix(destination.suffix + ".part")
+    partial.unlink(missing_ok=True)
+    downloaded = 0
+    next_report = 10 * _DOWNLOAD_CHUNK
+
+    request = urllib.request.Request(url, headers={"User-Agent": "Jarvis/3.1"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response, \
+                open(partial, "wb") as handle:
+            total = int(response.headers.get("Content-Length") or 0)
+            while True:
+                chunk = response.read(_DOWNLOAD_CHUNK)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if downloaded >= next_report:
+                    percent = f" ({downloaded * 100 // total}%)" if total else ""
+                    log(f"  ... {downloaded // (1 << 20)} МБ{percent}", "debug")
+                    next_report += 10 * _DOWNLOAD_CHUNK
+        if downloaded == 0:
+            raise OSError("сервер вернул пустой файл")
+        partial.replace(destination)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
+
+
+def _find_model_dir(root: Path) -> Path | None:
+    for candidate in root.iterdir():
+        if candidate.is_dir() and model_ready(candidate):
+            return candidate
+    return None
+
+
+# =====================================================================
+#  Слушатель
+# =====================================================================
 class Listener:
-    """Микрофон + Whisper."""
+    """Микрофон + Vosk."""
 
-    def __init__(self, model_size: str | None = None):
-        self.model_size = model_size or config.WHISPER_MODEL
-        self.sample_rate = config.SAMPLE_RATE
+    def __init__(self, model_path_arg: str | None = None):
+        if model_path_arg:
+            self.model_path = Path(model_path_arg)
+            if not self.model_path.is_absolute():
+                self.model_path = config.BASE_DIR / self.model_path
+        else:
+            self.model_path = model_path()
+        self.sample_rate = int(config.VOSK_SAMPLE_RATE)
         self.noise_floor = 0.015
         self._model = None
+        self._vosk = None
         self._model_lock = threading.Lock()
         self._busy = threading.Lock()
 
@@ -67,16 +190,23 @@ class Listener:
     def model_ready(self) -> bool:
         return self._model is not None
 
+    @property
+    def model_name(self) -> str:
+        return self.model_path.name
+
     def preload_model(self) -> bool:
-        """Загружает (при необходимости скачивает) модель Whisper."""
-        if not config.FEATURES["faster_whisper"]:
-            log("faster-whisper не установлен: pip install faster-whisper", "warn")
+        """Загружает модель Vosk (при необходимости скачивает её)."""
+        if not config.FEATURES["vosk"]:
+            log("Vosk не установлен: pip install vosk", "warn")
             return False
         try:
             self._ensure_model()
             return True
+        except SpeechError as exc:
+            log(str(exc), "error")
+            return False
         except Exception as exc:  # noqa: BLE001
-            log(f"Не удалось загрузить модель Whisper: {exc}", "error")
+            log(f"Не удалось загрузить модель Vosk: {exc}", "error")
             return False
 
     def _ensure_model(self):
@@ -85,19 +215,25 @@ class Listener:
         with self._model_lock:
             if self._model is not None:
                 return self._model
-            from faster_whisper import WhisperModel
+            from vosk import Model, SetLogLevel
 
-            log(f"Загружаю Whisper «{self.model_size}» "
-                f"({config.WHISPER_DEVICE}/{config.WHISPER_COMPUTE_TYPE})...", "info")
+            # Kaldi пишет в stderr служебные простыни — в консоли они лишние.
+            SetLogLevel(-1)
+            path = ensure_model(self.model_path)
+            log(f"Загружаю Vosk «{path.name}»...", "info")
             started = time.time()
-            self._model = WhisperModel(
-                self.model_size,
-                device=config.WHISPER_DEVICE,
-                compute_type=config.WHISPER_COMPUTE_TYPE,
-                download_root=str(config.MODELS_DIR),
-            )
-            log(f"Whisper готов за {time.time() - started:.1f} с.", "info")
+            self._vosk = __import__("vosk")
+            self._model = Model(str(path))
+            log(f"Vosk готов за {time.time() - started:.1f} с.", "info")
         return self._model
+
+    def _new_recognizer(self):
+        """Создаёт распознаватель. Отдельный метод — удобно подменять в тестах."""
+        vosk = self._vosk or __import__("vosk")
+        recognizer = vosk.KaldiRecognizer(self._ensure_model(), self.sample_rate)
+        if getattr(config, "VOSK_WORDS", True):
+            recognizer.SetWords(True)
+        return recognizer
 
     # ------------------------------------------------------------------
     #  Калибровка микрофона
@@ -195,23 +331,18 @@ class Listener:
     #  Распознавание
     # ------------------------------------------------------------------
     def transcribe(self, audio) -> str:
-        """int16-массив -> текст."""
-        if audio is None or len(audio) == 0:
+        """int16-массив (или байты PCM) -> текст."""
+        raw = _pcm16_bytes(audio)
+        if not raw:
             return ""
-        model = self._ensure_model()
-        audio_f = to_float32(audio)
-
-        segments, _info = model.transcribe(
-            audio_f,
-            language=config.WHISPER_LANGUAGE,
-            beam_size=config.WHISPER_BEAM_SIZE,
-            vad_filter=config.WHISPER_VAD_FILTER,
-            no_speech_threshold=config.WHISPER_NO_SPEECH_THRESHOLD,
-            condition_on_previous_text=config.WHISPER_CONDITION_ON_PREVIOUS,
-            initial_prompt=config.WHISPER_INITIAL_PROMPT or None,
-        )
-        text = " ".join(segment.text.strip() for segment in segments).strip()
-        return self._clean(text)
+        recognizer = self._new_recognizer()
+        recognizer.AcceptWaveform(raw)
+        try:
+            result = json.loads(recognizer.FinalResult())
+        except (ValueError, TypeError) as exc:
+            log(f"Vosk вернул некорректный результат: {exc}", "warn")
+            return ""
+        return self._clean(str(result.get("text", "")))
 
     @staticmethod
     def _clean(text: str) -> str:
@@ -221,8 +352,8 @@ class Listener:
         low = text.lower().strip(" .,!?-…")
         if len(low) < 2:
             return ""
-        if any(bad in low for bad in _HALLUCINATIONS):
-            log(f"Отброшена галлюцинация Whisper: «{text}»", "debug")
+        if any(bad in low for bad in _ARTIFACTS):
+            log(f"Отброшен артефакт распознавания: «{text}»", "debug")
             return ""
         # Сплошные повторы одного слова — тоже артефакт.
         words = low.split()
@@ -240,7 +371,7 @@ class Listener:
         Возвращает None, если обращения не было. Отдаём всю фразу, а не «да/нет»:
         если пользователь сказал «Джарвис, который час» на одном дыхании, команда
         уже внутри — записывать и распознавать её второй раз не нужно. Это экономит
-        один вызов Whisper (около 1,6 с на CPU) на каждой команде.
+        один проход распознавания на каждой команде.
         """
         try:
             audio = self.record_until_silence(
@@ -259,7 +390,7 @@ class Listener:
             return None
 
         audio = normalize_audio(audio)
-        text = normalize_text(self.transcribe(audio))
+        text = normalize_command_text(self.transcribe(audio))
         if not text:
             return None
         if self.has_wake_word(text):
@@ -279,6 +410,8 @@ class Listener:
                 return True
 
         # Нечёткое сравнение по отдельным словам — на случай оговорок.
+        import difflib
+
         for token in text.split():
             if len(token) < 4:
                 continue
@@ -319,3 +452,21 @@ class Listener:
         if text:
             log(f"Распознано: «{text}»", "info")
         return text
+
+
+def _pcm16_bytes(audio) -> bytes:
+    """Приводит int16-массив (numpy/list/bytes) к сырым байтам для Vosk."""
+    if audio is None:
+        return b""
+    if isinstance(audio, (bytes, bytearray)):
+        return bytes(audio)
+    if HAS_NUMPY:
+        array = np.asarray(audio)
+        if array.size == 0:
+            return b""
+        if array.dtype != np.int16:
+            if array.dtype.kind == "f":
+                array = np.clip(array, -1.0, 1.0) * 32767.0
+            array = array.astype(np.int16, copy=False)
+        return array.tobytes()
+    return b""
