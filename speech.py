@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Распознавание речи Джарвиса на Vosk.
+"""Распознавание речи Пятницы на Vosk.
 
 Запись звука — через ``sounddevice`` с VAD-детектором (останавливаемся, когда
 пользователь замолчал). Распознавание — локальный **Vosk**: небольшая русская
@@ -133,7 +133,7 @@ def _download(url: str, destination: Path) -> None:
     downloaded = 0
     next_report = 10 * _DOWNLOAD_CHUNK
 
-    request = urllib.request.Request(url, headers={"User-Agent": "Jarvis/3.1"})
+    request = urllib.request.Request(url, headers={"User-Agent": "Pyatnitsa/3.1"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response, \
                 open(partial, "wb") as handle:
@@ -369,7 +369,7 @@ class Listener:
         """Слушает окно и отдаёт фразу ЦЕЛИКОМ, если в ней прозвучало обращение.
 
         Возвращает None, если обращения не было. Отдаём всю фразу, а не «да/нет»:
-        если пользователь сказал «Джарвис, который час» на одном дыхании, команда
+        если пользователь сказал «Пятница, который час» на одном дыхании, команда
         уже внутри — записывать и распознавать её второй раз не нужно. Это экономит
         один проход распознавания на каждой команде.
         """

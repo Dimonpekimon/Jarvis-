@@ -22,6 +22,6 @@ export const STATE_COLOR: Record<AssistantState, string> = {
 
 export const ROLE_LABEL: Record<string, string> = {
   user: "Вы",
-  assistant: "Джарвис",
+  assistant: "Пятница",
   system: "Система",
 };

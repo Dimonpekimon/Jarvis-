@@ -1,13 +1,13 @@
 {
-  "name": "jarvis-desktop",
+  "name": "pyatnitsa-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Настольный оверлей-интерфейс для голосового ассистента «Джарвис»",
+  "description": "Настольный оверлей-интерфейс для голосового ассистента «Пятница»",
   "author": "dima",
   "license": "MIT",
   "main": "dist/main/main.js",
   "scripts": {
-    "dev": "concurrently -k -n VITE,MAIN,APP -c cyan,yellow,magenta \"vite\" \"npm:watch:main\" \"wait-on tcp:127.0.0.1:5273 && cross-env JARVIS_DEV=1 electron .\"",
+    "dev": "concurrently -k -n VITE,MAIN,APP -c cyan,yellow,magenta \"vite\" \"npm:watch:main\" \"wait-on tcp:127.0.0.1:5273 && cross-env PYATNITSA_DEV=1 electron .\"",
     "watch:main": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
     "build:main": "tsc -p tsconfig.main.json",
     "build:renderer": "vite build",

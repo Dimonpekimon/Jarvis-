@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""«Мозг» Джарвиса — бесплатный Gemini API.
+"""«Мозг» Пятницы — бесплатный Gemini API.
 
 По умолчанию используется модель ``gemini-3.5-flash``: она быстро отвечает
 по-русски, понимает картинки и доступна на бесплатном тарифе. Модель задаётся
 настройкой ``GEMINI_MODEL``, список запасных — ``GEMINI_FALLBACK_MODELS``.
 
-Ключ берётся из ``jarvis_settings.json`` (ключ ``GEMINI_API_KEY``) или из
+Ключ берётся из ``pyatnitsa_settings.json`` (ключ ``GEMINI_API_KEY``) или из
 переменной окружения ``GEMINI_API_KEY``. В репозиторий ключ не попадает.
 """
 
@@ -89,7 +89,7 @@ class Brain:
         key = self.api_key
         if not key:
             raise BrainUnavailable(
-                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в jarvis_settings.json "
+                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в pyatnitsa_settings.json "
                 "или задайте переменную окружения GEMINI_API_KEY."
             )
         return key
@@ -100,7 +100,7 @@ class Brain:
             self._available = False
             self._models = []
             self._last_error = (
-                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в jarvis_settings.json."
+                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в pyatnitsa_settings.json."
             )
             return []
         if (not force and self._available is not None
@@ -180,7 +180,7 @@ class Brain:
         """Возвращает (ок: bool, сообщение: str) — для стартовой диагностики."""
         if not self.key_present():
             return False, (
-                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в jarvis_settings.json "
+                "Ключ Gemini не задан. Впишите GEMINI_API_KEY в pyatnitsa_settings.json "
                 "или задайте переменную окружения GEMINI_API_KEY."
             )
         models = self.available_models(force=force)

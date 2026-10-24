@@ -12,7 +12,7 @@ import {
   type AppConfig,
   type AudioPayload,
   type BusEvent,
-  type JarvisBridge,
+  type PyatnitsaBridge,
   type OverlayMode,
   type SendResult,
   type SidecarStatus,
@@ -28,7 +28,7 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
   };
 }
 
-const bridge: JarvisBridge = {
+const bridge: PyatnitsaBridge = {
   getConfig: () => ipcRenderer.invoke(CH.getConfig) as Promise<AppConfig>,
   sendMessage: (text: string) => ipcRenderer.invoke(CH.sendMessage, text) as Promise<SendResult>,
   interrupt: () => ipcRenderer.send(CH.interrupt),
@@ -50,4 +50,4 @@ const bridge: JarvisBridge = {
   onOverlayMode: (cb) => subscribe<OverlayMode>(CH.overlayMode, cb),
 };
 
-contextBridge.exposeInMainWorld("jarvis", bridge);
+contextBridge.exposeInMainWorld("pyatnitsa", bridge);

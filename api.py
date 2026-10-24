@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""API ядра Джарвиса — единственный канал между Python и настольным окном.
+"""API ядра Пятницы — единственный канал между Python и настольным окном.
 
 Веб-интерфейса в браузере больше нет: страницу рисует Electron
 (``desktop/``). Python поднимает крошечный HTTP-сервер на localhost, отдаёт
@@ -69,30 +69,30 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
 # =====================================================================
 #  ВСПОМОГАТЕЛЬНОЕ
 # =====================================================================
-def safe_status(jarvis) -> str:
+def safe_status(pyatnitsa) -> str:
     """Статус систем — интерфейс не должен падать из-за проблем в ядре."""
     try:
-        return jarvis.status()
+        return pyatnitsa.status()
     except Exception as exc:  # noqa: BLE001
         return f"Статус недоступен: {exc}"
 
 
-def interrupt(jarvis) -> None:
+def interrupt(pyatnitsa) -> None:
     """Прерывает текущую фразу и очищает очередь озвучки."""
     try:
-        jarvis.speaker.stop()
+        pyatnitsa.speaker.stop()
     except Exception as exc:  # noqa: BLE001
         log(f"Не удалось прервать озвучку: {exc}", "warn")
 
 
-def speak_text(jarvis, text: str) -> None:
+def speak_text(pyatnitsa, text: str) -> None:
     """Озвучивает текст, отредактированный пользователем в интерфейсе.
 
     ``publish=False`` просит озвучку не публиковать реплику ассистента заново:
     текст уже показан в интерфейсе, и повторное событие давало дубль.
     """
     try:
-        jarvis.speaker.say(text, publish=False)
+        pyatnitsa.speaker.say(text, publish=False)
     except Exception as exc:  # noqa: BLE001
         log(f"Не удалось озвучить правку: {exc}", "warn")
 
@@ -155,8 +155,8 @@ class Dispatcher:
     отвечает ``429`` ещё до подтверждения — работа не принимается молча.
     """
 
-    def __init__(self, jarvis, maxsize: int = QUEUE_MAX):
-        self._jarvis = jarvis
+    def __init__(self, pyatnitsa, maxsize: int = QUEUE_MAX):
+        self._pyatnitsa = pyatnitsa
         self._queue: "queue.Queue[tuple]" = queue.Queue(maxsize=max(1, int(maxsize)))
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -207,9 +207,9 @@ class Dispatcher:
                 break  # остановка — не начинаем отложенную работу
             try:
                 if kind == "message":
-                    self._jarvis.handle(payload)
+                    self._pyatnitsa.handle(payload)
                 elif kind == "reset":
-                    self._jarvis.reset_dialog()
+                    self._pyatnitsa.reset_dialog()
             except Exception as exc:  # noqa: BLE001
                 log(f"Ошибка обработки реплики из интерфейса: {exc}", "error")
                 emit_message("system", f"Не удалось обработать: {exc}")
@@ -239,31 +239,31 @@ class Dispatcher:
                 break
 
 
-# Совместимость: старые вызовы ``submit_message(jarvis, text)`` без диспетчера.
+# Совместимость: старые вызовы ``submit_message(pyatnitsa, text)`` без диспетчера.
 _legacy_lock = threading.Lock()
 _legacy_dispatchers: "dict[int, Dispatcher]" = {}
 
 
-def _legacy_dispatcher(jarvis) -> Dispatcher:
-    key = id(jarvis)
+def _legacy_dispatcher(pyatnitsa) -> Dispatcher:
+    key = id(pyatnitsa)
     with _legacy_lock:
         dispatcher = _legacy_dispatchers.get(key)
         if dispatcher is None or not dispatcher.running:
-            dispatcher = Dispatcher(jarvis)
+            dispatcher = Dispatcher(pyatnitsa)
             dispatcher.start()
             _legacy_dispatchers[key] = dispatcher
         return dispatcher
 
 
-def submit_message(jarvis, text: str, dispatcher: Dispatcher | None = None) -> bool:
+def submit_message(pyatnitsa, text: str, dispatcher: Dispatcher | None = None) -> bool:
     """Публичная точка: реплика уходит в FIFO-очередь диспетчера.
 
     ``True`` — принято, ``False`` — очередь переполнена (HTTP-слой отдаст 429).
     Без явного диспетчера используется общий для этого ядра — так сохраняется
-    прежний вызов ``submit_message(jarvis, text)``.
+    прежний вызов ``submit_message(pyatnitsa, text)``.
     """
     if dispatcher is None:
-        dispatcher = _legacy_dispatcher(jarvis)
+        dispatcher = _legacy_dispatcher(pyatnitsa)
     return dispatcher.submit_message(text)
 
 
@@ -289,14 +289,14 @@ class _Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def _make_handler(jarvis, dispatcher: Dispatcher):
+def _make_handler(pyatnitsa, dispatcher: Dispatcher):
     """Собирает класс обработчика, замкнутый на ассистента и диспетчер."""
 
-    class JarvisHandler(BaseHTTPRequestHandler):
+    class PyatnitsaHandler(BaseHTTPRequestHandler):
         # HTTP/1.0 + явный Content-Length: тело заканчивается концом соединения,
         # поэтому SSE-поток работает без возни с chunked-кодированием.
         protocol_version = "HTTP/1.0"
-        server_version = f"JarvisCore/{VERSION}"
+        server_version = f"PyatnitsaCore/{VERSION}"
         timeout = READ_TIMEOUT  # предел ожидания запроса и тела от клиента
 
         def log_message(self, fmt, *args):  # noqa: A003
@@ -413,12 +413,12 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
                 return
             path = self.path.split("?", 1)[0]
             if path == "/api/health":
-                self._json({"ok": True, "app": "jarvis", "version": VERSION,
+                self._json({"ok": True, "app": "pyatnitsa", "version": VERSION,
                             "ui": "desktop"})
                 return
             if path == "/api/state":
                 self._json({"ok": True, "state": events.current_state(),
-                            "status": safe_status(jarvis)})
+                            "status": safe_status(pyatnitsa)})
                 return
             if path == "/api/stream":
                 self._stream()
@@ -428,7 +428,7 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
                 return
             if path == "/":
                 # Страницы здесь нет: интерфейс — отдельное приложение Electron.
-                self._json({"ok": True, "app": "jarvis", "ui": "desktop",
+                self._json({"ok": True, "app": "pyatnitsa", "ui": "desktop",
                             "version": VERSION})
                 return
             self._json({"ok": False, "error": "not found"}, 404)
@@ -444,7 +444,7 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
             channel = bus.subscribe()
             try:
                 self._event({"type": "hello", "state": events.current_state(),
-                             "status": safe_status(jarvis)})
+                             "status": safe_status(pyatnitsa)})
                 while True:
                     try:
                         event = channel.get(timeout=SSE_PING_SEC)
@@ -486,7 +486,7 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
                 text = ""
 
             if path == "/api/message":
-                interrupt(jarvis)
+                interrupt(pyatnitsa)
                 if not dispatcher.submit_message(text):
                     self._json({"ok": False, "error": "busy"}, 429)
                     return
@@ -494,10 +494,10 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
                 return
             if path == "/api/speak":
                 self._json({"ok": True})
-                speak_text(jarvis, text)
+                speak_text(pyatnitsa, text)
                 return
             if path == "/api/interrupt":
-                interrupt(jarvis)
+                interrupt(pyatnitsa)
                 self._json({"ok": True})
                 return
             if path == "/api/reset":
@@ -509,7 +509,7 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
                 return
             self._json({"ok": False, "error": "not found"}, 404)
 
-    return JarvisHandler
+    return PyatnitsaHandler
 
 
 # =====================================================================
@@ -518,13 +518,13 @@ def _make_handler(jarvis, dispatcher: Dispatcher):
 class CoreAPI:
     """HTTP/SSE-сервер ядра. Работает в отдельном потоке."""
 
-    def __init__(self, jarvis, host: str | None = None, port: int | None = None,
+    def __init__(self, pyatnitsa, host: str | None = None, port: int | None = None,
                  queue_size: int = QUEUE_MAX):
-        self.jarvis = jarvis
+        self.pyatnitsa = pyatnitsa
         self.host = normalize_host(host if host is not None else config.API_HOST)
         self.port = int(port if port is not None else config.API_PORT)
         self.url = ""
-        self.dispatcher = Dispatcher(jarvis, maxsize=queue_size)
+        self.dispatcher = Dispatcher(pyatnitsa, maxsize=queue_size)
         self._server: _Server | None = None
         self._thread: threading.Thread | None = None
 
@@ -555,7 +555,7 @@ class CoreAPI:
         if self._server is not None:
             return True
 
-        handler = _make_handler(self.jarvis, self.dispatcher)
+        handler = _make_handler(self.pyatnitsa, self.dispatcher)
         if not self._bind(handler):
             return False
 

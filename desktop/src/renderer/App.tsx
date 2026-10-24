@@ -44,7 +44,7 @@ function useClickThrough(): void {
     const apply = (value: boolean): void => {
       if (value === ignoring) return; // не спамим IPC на каждое движение
       ignoring = value;
-      window.jarvis.setIgnoreMouse(value);
+      window.pyatnitsa.setIgnoreMouse(value);
     };
 
     const onMove = (event: MouseEvent): void => {
@@ -73,7 +73,7 @@ export default function App(): JSX.Element {
   const [overlayMode, setOverlayMode] = useState<OverlayMode>("normal");
   const [uiMode, setUiMode] = useState<UiMode>("compact");
   const [audible, setAudible] = useState<boolean>(
-    () => window.localStorage.getItem("jarvis.audible") === "1",
+    () => window.localStorage.getItem("pyatnitsa.audible") === "1",
   );
 
   const levelRef = useRef(0);
@@ -86,7 +86,7 @@ export default function App(): JSX.Element {
 
   /** Просит у main настоящий WAV из кэша Piper и гоняет его через анализатор. */
   const playAssistantAudio = useCallback(async (text: string): Promise<void> => {
-    const payload = await window.jarvis.playTts(text);
+    const payload = await window.pyatnitsa.playTts(text);
     if (!payload) return; // не нашлось — визуализатор останется на уровнях из SSE
     try {
       await audioEngine.playBase64(payload.base64, { silent: !audibleRef.current });
@@ -129,15 +129,15 @@ export default function App(): JSX.Element {
   );
 
   useEffect(() => {
-    void window.jarvis.getConfig().then((config) => {
+    void window.pyatnitsa.getConfig().then((config) => {
       setOverlayMode(config.overlayMode);
       setUiMode(config.uiMode);
     });
 
-    const offEvent = window.jarvis.onEvent(handleEvent);
-    const offSidecar = window.jarvis.onSidecar(setSidecar);
-    const offUi = window.jarvis.onUiMode(setUiMode);
-    const offOverlay = window.jarvis.onOverlayMode(setOverlayMode);
+    const offEvent = window.pyatnitsa.onEvent(handleEvent);
+    const offSidecar = window.pyatnitsa.onSidecar(setSidecar);
+    const offUi = window.pyatnitsa.onUiMode(setUiMode);
+    const offOverlay = window.pyatnitsa.onOverlayMode(setOverlayMode);
 
     return () => {
       offEvent();
@@ -153,9 +153,9 @@ export default function App(): JSX.Element {
       if (event.key !== "Escape") return;
       const current = stateRef.current;
       if (current === "speaking" || current === "thinking") {
-        window.jarvis.interrupt();
+        window.pyatnitsa.interrupt();
       } else if (uiMode === "dialog") {
-        window.jarvis.setUiMode("compact");
+        window.pyatnitsa.setUiMode("compact");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -164,7 +164,7 @@ export default function App(): JSX.Element {
 
   const submit = useCallback(async (text: string): Promise<void> => {
     // Реплику пользователя пришлёт само ядро событием message — не дублируем.
-    const result = await window.jarvis.sendMessage(text);
+    const result = await window.pyatnitsa.sendMessage(text);
     if (!result.ok) {
       setMessages((prev) =>
         [...prev, { id: newId(), role: "system" as const, text: `Не отправлено: ${result.error ?? "ошибка"}`, at: Date.now() }].slice(-MAX_MESSAGES),
@@ -175,13 +175,13 @@ export default function App(): JSX.Element {
   const toggleAudible = useCallback((): void => {
     setAudible((prev) => {
       const next = !prev;
-      window.localStorage.setItem("jarvis.audible", next ? "1" : "0");
+      window.localStorage.setItem("pyatnitsa.audible", next ? "1" : "0");
       return next;
     });
   }, []);
 
   const openDialog = useCallback((): void => {
-    window.jarvis.setUiMode("dialog");
+    window.pyatnitsa.setUiMode("dialog");
   }, []);
 
   return (
@@ -200,16 +200,16 @@ export default function App(): JSX.Element {
             overlayMode={overlayMode}
             audible={audible}
             onSubmit={(text) => void submit(text)}
-            onInterrupt={() => window.jarvis.interrupt()}
-            onReset={() => void window.jarvis.reset()}
+            onInterrupt={() => window.pyatnitsa.interrupt()}
+            onReset={() => void window.pyatnitsa.reset()}
             onTest={() => {
-              void window.jarvis.playStub().then((payload) => {
+              void window.pyatnitsa.playStub().then((payload) => {
                 if (payload) void audioEngine.playBase64(payload.base64, { silent: !audible });
               });
             }}
             onToggleAudible={toggleAudible}
-            onToggleDim={() => window.jarvis.setOverlayMode(overlayMode === "dim" ? "normal" : "dim")}
-            onCollapse={() => window.jarvis.setUiMode("compact")}
+            onToggleDim={() => window.pyatnitsa.setOverlayMode(overlayMode === "dim" ? "normal" : "dim")}
+            onCollapse={() => window.pyatnitsa.setUiMode("compact")}
           />
         ) : (
           <button type="button" className="expand" data-hit="1" title="Открыть диалог (Ctrl+Alt+U)" onClick={openDialog}>

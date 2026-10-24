@@ -1,4 +1,4 @@
-# Jarvis Overlay — настольный UI для «Джарвиса»
+# Пятница Overlay — настольный UI для «Пятницаа»
 
 Отдельное приложение на **Electron + TypeScript + React**. Рисует поверх рабочего
 стола полупрозрачную карточку с визуализатором в стиле Winamp, умеет показывать
@@ -31,7 +31,7 @@ desktop/
     │   ├── ttsAudio.ts       готовый WAV от Piper из кэша → base64
     │   └── log.ts            лог в консоль + файл
     ├── preload/
-    │   └── preload.ts        contextBridge → window.jarvis
+    │   └── preload.ts        contextBridge → window.pyatnitsa
     └── renderer/
         ├── index.html        CSP, точка входа
         ├── main.tsx          createRoot
@@ -78,7 +78,7 @@ Node-окружении и им нужен CommonJS без бандлинга; r
    ```ts
    const el = document.elementFromPoint(event.clientX, event.clientY);
    const interactive = el instanceof Element && el.closest("[data-hit]") !== null;
-   if (interactive !== ignoring) { ignoring = interactive; window.jarvis.setIgnoreMouse(ignoring); }
+   if (interactive !== ignoring) { ignoring = interactive; window.pyatnitsa.setIgnoreMouse(ignoring); }
    ```
    Состояние меняется только на переходах — иначе IPC захлебнётся.
 
@@ -113,7 +113,7 @@ Node-окружении и им нужен CommonJS без бандлинга; r
 | Диалог | 430×470, история + ввод | `Ctrl+Alt+U`, кнопка ⌃ |
 
 Окно при смене размера «растёт» от правого нижнего угла, чтобы не уезжать за
-экран. Выбранные режимы сохраняются в `%APPDATA%/jarvis-desktop/overlay.json`.
+экран. Выбранные режимы сохраняются в `%APPDATA%/pyatnitsa-desktop/overlay.json`.
 
 Дополнительно: `Ctrl+Alt+Space` — прервать речь, `Esc` — прервать/свернуть.
 
@@ -146,7 +146,7 @@ sha1("|".join(["piper", text, str(model_path), str(PIPER_SPEED), str(PIPER_VOLUM
 
 Тонкости, из-за которых это вообще работает:
 
-* числа берутся из `jarvis_settings.json` **как текст**: Python хеширует `str(1.0)`
+* числа берутся из `pyatnitsa_settings.json` **как текст**: Python хеширует `str(1.0)`
   = `"1.0"`, а `JSON.parse` в JS превратил бы это в `1`;
 * путь к модели тоже берётся из настроек дословно (там абсолютный путь);
 * нужен `TTS_USE_CACHE: true` и `TTS_ENGINE: "piper"`.
@@ -207,7 +207,7 @@ if path == "/api/tts.wav":
   и Piper (63 МБ) **не** пакуются — они докачиваются при первом запуске, иначе
   установщик распухает до сотен мегабайт.
 * Интерпретатор не встраивается. Кандидаты перебираются по порядку:
-  `JARVIS_PYTHON` → `.venv/Scripts/python.exe` проекта → `python` → `py -3`.
+  `PYATNITSA_PYTHON` → `.venv/Scripts/python.exe` проекта → `python` → `py -3`.
   Перед запуском каждый проверяется пробой `python -c "import requests"`:
   в PATH часто оказывается «чужой» python (менеджеры версий, Store, другой
   проект), и без проверки сайдкар падал бы на `import requests` по кругу.
@@ -249,13 +249,13 @@ npm run dist       # установщик NSIS в release/
 
 | Переменная | Смысл |
 |---|---|
-| `JARVIS_NO_SIDECAR=1` | не запускать Python (проверка одного UI) |
-| `JARVIS_PYTHON` | явный путь к интерпретатору |
-| `JARVIS_PYTHON_ARGS` | доп. аргументы, например `--no-tts --mode text` |
-| `JARVIS_API` | другой адрес ядра (по умолчанию `http://127.0.0.1:8765`) |
-| `JARVIS_DEV_URL` | адрес dev-сервера Vite |
+| `PYATNITSA_NO_SIDECAR=1` | не запускать Python (проверка одного UI) |
+| `PYATNITSA_PYTHON` | явный путь к интерпретатору |
+| `PYATNITSA_PYTHON_ARGS` | доп. аргументы, например `--no-tts --mode text` |
+| `PYATNITSA_API` | другой адрес ядра (по умолчанию `http://127.0.0.1:8765`) |
+| `PYATNITSA_DEV_URL` | адрес dev-сервера Vite |
 
-Проверка визуализатора без ядра: `JARVIS_NO_SIDECAR=1 npm run dev`, открыть
+Проверка визуализатора без ядра: `PYATNITSA_NO_SIDECAR=1 npm run dev`, открыть
 диалог и нажать ♪ — проиграется `test-voice.wav` (синтезирован Piper-ом
 скриптом `scripts/gen-test-audio.py`).
 
@@ -278,13 +278,13 @@ canvas имеет ненулевой размер, в компакте карт�
 |---|---|
 | `TypeError: Cannot read properties of undefined (reading 'isPackaged')` | в окружении стоит `ELECTRON_RUN_AS_NODE=1` — electron работает как обычный Node. Запускайте без этой переменной. |
 | `GPU process exited unexpectedly` → `GPU process isn't usable. Goodbye.` | драйвер или инжект в GPU-процесс (антивирус, оверлей) не даёт создать контекст. Помогает `--disable-gpu-sandbox`; `--disable-gpu` сам по себе — нет, GPU-процесс всё равно стартует и падает. `overlay.py` теперь сам ловит такой выход и перезапускает окно с этим флагом, запоминая его в `data/overlay_flags.json`. |
-| окно не появляется вовсе, в `data/jarvis.log`: `npm не найден` | раньше это блокировало запуск, даже когда `dist/` и `electron.exe` уже были. Сейчас npm нужен только для `npm install` / `npm run build`; для пересборки поставьте Node.js 20+ (или задайте `JARVIS_NODE`). |
+| окно не появляется вовсе, в `data/pyatnitsa.log`: `npm не найден` | раньше это блокировало запуск, даже когда `dist/` и `electron.exe` уже были. Сейчас npm нужен только для `npm install` / `npm run build`; для пересборки поставьте Node.js 20+ (или задайте `PYATNITSA_NODE`). |
 | `Unable to load preload script: module not found: ../shared/ipc` | preload обязан работать с `sandbox: false` — в песочнице локальный `require` недоступен. В `main.ts` это уже выставлено. |
-| «ядро не на связи», в логе `ModuleNotFoundError: No module named 'requests'` | `python` из PATH — не тот интерпретатор. Укажите `JARVIS_PYTHON=...\Python314\python.exe` или создайте `.venv` в проекте. |
+| «ядро не на связи», в логе `ModuleNotFoundError: No module named 'requests'` | `python` из PATH — не тот интерпретатор. Укажите `PYATNITSA_PYTHON=...\Python314\python.exe` или создайте `.venv` в проекте. |
 | окно есть, но клики проходят насквозь всегда | проверьте, что в разметке есть `data-hit`, а `pointer-events` у нужного элемента не `none`. |
-| пустое прозрачное окно без содержимого | `ERR_CONNECTION_REFUSED` на 5273: запущен `JARVIS_DEV=1`, а Vite не поднят. `npm run dev` либо просто `npm start`. |
+| пустое прозрачное окно без содержимого | `ERR_CONNECTION_REFUSED` на 5273: запущен `PYATNITSA_DEV=1`, а Vite не поднят. `npm run dev` либо просто `npm start`. |
 
-Логи: консоль + `%APPDATA%/jarvis-desktop/logs/jarvis-overlay.log`
+Логи: консоль + `%APPDATA%/pyatnitsa-desktop/logs/pyatnitsa-overlay.log`
 (в собранном приложении консоли нет, файл — единственный источник правды).
 
 ---

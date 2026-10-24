@@ -28,7 +28,7 @@ export class Sidecar {
 
   start(): void {
     if (!sidecarEnabled()) {
-      this.onStatus({ state: "offline", detail: "сайдкар отключён (JARVIS_NO_SIDECAR=1)" });
+      this.onStatus({ state: "offline", detail: "сайдкар отключён (PYATNITSA_NO_SIDECAR=1)" });
       return;
     }
     if (this.child) return;

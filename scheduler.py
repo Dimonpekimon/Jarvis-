@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Таймеры и напоминания Джарвиса с сохранением между запусками.
+"""Таймеры и напоминания Пятницы с сохранением между запусками.
 
 Раньше напоминания жили только в памяти и терялись при перезапуске.
 Теперь они пишутся в ``data/reminders.json`` и восстанавливаются при старте.
@@ -147,7 +147,7 @@ class Scheduler:
         log(phrase, "info")
         if callable(self._notify):
             try:
-                self._notify("Джарвис", phrase)
+                self._notify(config.ASSISTANT_NAME, phrase)
             except Exception:  # noqa: BLE001
                 pass
         if callable(self._speak):
@@ -173,7 +173,7 @@ class Scheduler:
         label = (label or "").strip() or None
         with self._lock:
             if self._closed:
-                return "Джарвис уже выключается — новый таймер не ставлю, сэр."
+                return f"{config.ASSISTANT_NAME} уже выключается — новый таймер не ставлю, сэр."
             item_id = self._new_id("timer")
             now = time.time()
             self._items[item_id] = {
@@ -199,7 +199,8 @@ class Scheduler:
         delay = min(delay, self._MAX_DELAY)
         with self._lock:
             if self._closed:
-                return "Джарвис уже выключается — напоминание не записываю, сэр."
+                return (f"{config.ASSISTANT_NAME} уже выключается — "
+                        "напоминание не записываю, сэр.")
             item_id = self._new_id("reminder")
             now = time.time()
             self._items[item_id] = {

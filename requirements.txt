@@ -1,4 +1,4 @@
-# Джарвис v3.1 — зависимости
+# Пятница v3.1 — зависимости
 # Установка:  pip install -r requirements.txt
 
 # --- Ядро ---
@@ -36,5 +36,5 @@ winrt-Windows.Foundation
 winrt-Windows.Foundation.Collections
 
 # --- Опционально ---
-python-telegram-bot>=21.0     # управление Джарвисом с телефона
+python-telegram-bot>=21.0     # управление Пятницаом с телефона
 # pytesseract>=0.3.10         # альтернативный OCR (нужен ещё Tesseract OCR)

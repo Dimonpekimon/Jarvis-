@@ -96,7 +96,7 @@ export default function DialogPanel(props: Props): JSX.Element {
       <div className="messages" ref={listRef} data-hit="1">
         {messages.length === 0 && (
           <p className="hint">
-            Скажите «Джарвис…» или напишите здесь. Ответ озвучит Python, а столбики наверху покажут его спектр.
+            Скажите «Пятница…» или напишите здесь. После ответа можно говорить без оклика — пока не станет тихо. Ответ озвучит Python, а столбики наверху покажут его спектр.
           </p>
         )}
         {messages.map((message) => (

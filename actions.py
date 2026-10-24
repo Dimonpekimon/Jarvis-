@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Системные действия Джарвиса.
+"""Системные действия Пятницы.
 
 Каждый метод возвращает строку-ответ (её озвучит ядро) либо None.
 Все операции защищены проверками: если нужной библиотеки нет, ассистент
@@ -474,7 +474,7 @@ class Actions:
 
             config.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = config.SCREENSHOT_DIR / f"Jarvis_{prefix}_{stamp}.png"
+            path = config.SCREENSHOT_DIR / f"Pyatnitsa_{prefix}_{stamp}.png"
             ImageGrab.grab(all_screens=True).save(path)
             return path
         except Exception as exc:  # noqa: BLE001
@@ -680,7 +680,7 @@ class Actions:
                 log(f"Ошибка спящего режима: {exc}", "error")
 
         try:
-            threading.Thread(target=_suspend, name="jarvis-sleep", daemon=True).start()
+            threading.Thread(target=_suspend, name="pyatnitsa-sleep", daemon=True).start()
         except Exception as exc:  # noqa: BLE001
             log(f"Не удалось запланировать сон: {exc}", "error")
             return "Не удалось перейти в спящий режим, сэр."

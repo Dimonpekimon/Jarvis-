@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Ярлык «Джарвис» на рабочем столе — фоновый запуск без консоли.
+"""Ярлык «Пятница» на рабочем столе — фоновый запуск без консоли.
 
-Ярлык запускает ``Джарвис.exe main.py --background``, где ``Джарвис.exe`` —
+Ярлык запускает ``Пятница.exe main.py --background``, где ``Пятница.exe`` —
 копия ``pythonw.exe`` рядом с проектом. Диспетчер задач берёт имя процесса
-из имени файла, поэтому ассистент виден там как «Джарвис.exe», а не как
-«pythonw.exe». Копия создаётся автоматически (см. :func:`jarvis_exe`).
+из имени файла, поэтому ассистент виден там как «Пятница.exe», а не как
+«pythonw.exe». Копия создаётся автоматически (см. :func:`pyatnitsa_exe`).
 
 Режим запуска:
 
 * окна консоли нет — ассистент живёт в фоне;
 * текстовый ввод не спрашивается (набирать его негде);
-* лог пишется в ``data/jarvis.log``;
-* управление — голосом («Джарвис, ...») и через настольное окно,
+* лог пишется в ``data/pyatnitsa.log``;
+* управление — голосом («Пятница, ...») и через настольное окно,
   которое открывается вместе с ассистентом.
 
 Тот же режим можно включить вручную: ``python main.py --background``.
@@ -32,9 +32,9 @@ import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_NAME = "Джарвис"
-JARVIS_EXE_NAME = "Джарвис.exe"
-DESCRIPTION = "Джарвис — голосовой ассистент (фоновый запуск, интерфейс в браузере)"
+DEFAULT_NAME = "Пятница"
+PYATNITSA_EXE_NAME = "Пятница.exe"
+DESCRIPTION = "Пятница — голосовой ассистент (фоновый запуск, настольное окно)"
 
 
 def desktop_dir() -> Path:
@@ -56,11 +56,11 @@ def pythonw() -> Path:
     return candidate if candidate.exists() else Path(sys.executable)
 
 
-def jarvis_exe() -> Path:
-    """Копия pythonw.exe под именем «Джарвис.exe» — имя процесса в диспетчере.
+def pyatnitsa_exe() -> Path:
+    """Копия pythonw.exe под именем «Пятница.exe» — имя процесса в диспетчере.
 
     Диспетчер задач показывает имя файла, а не заголовок окна, поэтому
-    переименованная копия интерпретатора видна как «Джарвис.exe». Python при
+    переименованная копия интерпретатора видна как «Пятница.exe». Python при
     этом работает нормально: свою библиотеку он находит по реестру, а не по
     имени файла — проверено на этой машине (``sys.prefix`` определяется верно,
     сторонние пакеты импортируются).
@@ -68,13 +68,13 @@ def jarvis_exe() -> Path:
     Если скопировать не удалось (нет прав, занят файл) — возвращаем обычный
     ``pythonw.exe``: ярлык всё равно рабочий, просто имя процесса будет другим.
     """
-    target = BASE_DIR / JARVIS_EXE_NAME
+    target = BASE_DIR / PYATNITSA_EXE_NAME
     source = pythonw()
     try:
         if not target.exists() or target.stat().st_size != source.stat().st_size:
             shutil.copy2(source, target)
     except OSError as exc:
-        print(f"[i] Не удалось подготовить {JARVIS_EXE_NAME}: {exc}")
+        print(f"[i] Не удалось подготовить {PYATNITSA_EXE_NAME}: {exc}")
         return source
     return target
 
@@ -86,7 +86,7 @@ def create_shortcut(name: str, exe_copy: bool = True) -> int:
         print("Нужен pywin32: pip install pywin32")
         return 1
 
-    target = jarvis_exe() if exe_copy else pythonw()
+    target = pyatnitsa_exe() if exe_copy else pythonw()
     main_py = BASE_DIR / "main.py"
     link = desktop_dir() / f"{name}.lnk"
 
@@ -106,7 +106,7 @@ def create_shortcut(name: str, exe_copy: bool = True) -> int:
     print(f"Ярлык создан: {link}")
     print(f"  команда:      {target.name} \"{main_py}\" --background")
     print(f"  рабочая папка: {BASE_DIR}")
-    print("  окна консоли нет, лог — data/jarvis.log, интерфейс откроется в браузере.")
+    print("  окна консоли нет, лог — data/pyatnitsa.log, интерфейс откроется в браузере.")
     print(f"  в диспетчере задач процесс виден как «{target.name}».")
     return 0
 
@@ -122,7 +122,7 @@ def remove_shortcut(name: str) -> int:
         print(f"Ярлыка нет: {link}")
 
     # Копию интерпретатора убираем вместе с ярлыком — это её единственный смысл.
-    exe = BASE_DIR / JARVIS_EXE_NAME
+    exe = BASE_DIR / PYATNITSA_EXE_NAME
     if exe.exists():
         try:
             exe.unlink()
@@ -134,11 +134,11 @@ def remove_shortcut(name: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Ярлык Джарвиса на рабочем столе")
+    parser = argparse.ArgumentParser(description="Ярлык Пятницы на рабочем столе")
     parser.add_argument("--name", default=DEFAULT_NAME, help="имя ярлыка")
     parser.add_argument("--remove", action="store_true", help="удалить ярлык")
     parser.add_argument("--no-exe-copy", action="store_true",
-                        help="не делать копию pythonw.exe под именем «Джарвис.exe»")
+                        help="не делать копию pythonw.exe под именем «Пятница.exe»")
     args = parser.parse_args()
 
     if args.remove:

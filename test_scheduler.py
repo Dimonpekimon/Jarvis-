@@ -160,7 +160,7 @@ class SchedulerTest(unittest.TestCase):
         timer = FakeTimer.instances[-1]
         timer.fire()
         self.assertEqual(self.spoken, ["чайник"])
-        self.assertEqual(self.notified, [("Джарвис", "чайник")])
+        self.assertEqual(self.notified, [(config.ASSISTANT_NAME, "чайник")])
         self.assertEqual(restarted.count, 0)
 
     def test_restart_restores_reminder_text(self):

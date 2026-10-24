@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Синтез речи Джарвиса.
+"""Синтез речи Пятницы.
 
 Основной движок — **Piper**: локальная нейросеть, работает офлайн и не зависит
 от доступности серверов Microsoft. Цепочка (первый доступный побеждает):
@@ -27,11 +27,12 @@ import hashlib
 import queue
 import threading
 import time
-import urllib.request
 import wave
 from pathlib import Path
 
 import config
+import tone
+import voices
 from events import emit_level, emit_message, emit_state
 from utils import log
 
@@ -67,7 +68,7 @@ class _SpeechCancelled(Exception):
 # =====================================================================
 # Один и тот же псевдоним MCI на весь процесс: так команда stop может добраться
 # до играющего файла из другого потока (у MCI нет объектов, только строки).
-_MCI_ALIAS = "jarvis_tts_play"
+_MCI_ALIAS = "pyatnitsa_tts_play"
 
 
 def _decode_with_pyav(path: Path, target_rate: int = 24000):
@@ -296,6 +297,52 @@ def _cache_key(*parts: str) -> str:
     return digest
 
 
+def tone_generation() -> str:
+    """Подпись текущей обработки тембра: имя профиля + его числа.
+
+    Нужна, чтобы отличить «кэш от прошлого профиля» от «кэш от текущего».
+    """
+    return voices.tone_name() + "/" + tone.signature(voices.tone_profile())
+
+
+def ensure_tone_cache(cache_dir: Path | None = None) -> bool:
+    """Сбрасывает кэш WAV, если профиль тембра сменился. True — сбрасывал.
+
+    Почему не через ключ кэша: ключ повторяет настольное окно
+    (``desktop/src/main/ttsAudio.ts``), а оно о профилях не знает. Добавить
+    туда ещё одно поле значило бы держать в синхроне уже не только строку
+    ключа, но и таблицу профилей. Вместо этого рядом с кэшем лежит подпись
+    профиля: сменилась — старые файлы удаляются, и голос не звучит по-старому
+    до истечения срока жизни кэша.
+    """
+    directory = Path(cache_dir or config.CACHE_DIR)
+    current = tone_generation()
+    marker = directory / ".piper-tone"
+    try:
+        if marker.read_text(encoding="utf-8").strip() == current:
+            return False
+    except OSError:
+        pass
+
+    removed = 0
+    try:
+        for path in directory.iterdir():
+            if path.is_file() and path.suffix.lower() == ".wav":
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    continue
+        marker.write_text(current, encoding="utf-8")
+    except OSError as exc:
+        log(f"Не удалось обновить кэш тембра: {exc}", "debug")
+        return False
+    if removed:
+        log(f"Профиль тембра изменился — кэш озвучки очищен ({removed} файлов).",
+            "info")
+    return True
+
+
 def prune_tts_cache(cache_dir: Path | None = None, *, now: float | None = None) -> None:
     """Удаляет устаревшие и самые старые файлы кэша TTS.
 
@@ -373,73 +420,94 @@ def list_edge_voices(language_filter: str = "ru") -> list:
 #  ГОЛОС PIPER (локальная модель)
 # =====================================================================
 def piper_model_path() -> Path:
-    """Путь к модели Piper; относительный путь считается от папки проекта."""
-    path = Path(config.PIPER_MODEL)
-    if not path.is_absolute():
-        path = config.BASE_DIR / path
-    return path
+    """Файл модели активного голоса.
+
+    Каталог голосов и приоритеты выбора живут в ``voices.py``: там же описано,
+    почему имя голоса важнее явного пути и как угадывается голос по старым
+    настройкам (когда ``PIPER_MODEL`` ещё указывал на конкретный файл).
+    """
+    return voices.active_path()
 
 
 def piper_model_ready(model_path: Path | None = None) -> bool:
     """Есть ли на диске модель Piper вместе с её конфигом."""
     model = Path(model_path) if model_path else piper_model_path()
-    return (model.exists() and model.stat().st_size > 0
-            and Path(str(model) + ".json").exists())
-
-
-def _download_to(url: str, destination: Path) -> None:
-    """Скачивает файл во временный ``.part`` и переименовывает только после успеха."""
-    partial = destination.with_suffix(destination.suffix + ".part")
-    partial.unlink(missing_ok=True)
     try:
-        request = urllib.request.Request(url, headers={"User-Agent": "Jarvis/3.1"})
-        with urllib.request.urlopen(request, timeout=60) as response, \
-                open(partial, "wb") as handle:
-            while True:
-                chunk = response.read(1 << 20)
-                if not chunk:
-                    break
-                handle.write(chunk)
-        if partial.stat().st_size == 0:
-            raise OSError("сервер вернул пустой файл")
-        partial.replace(destination)
-    except Exception:
-        partial.unlink(missing_ok=True)
-        raise
+        return (model.exists() and model.stat().st_size > 1_000_000
+                and Path(str(model) + ".json").exists())
+    except OSError:
+        return False
 
 
 def ensure_piper_model(model_path: Path | None = None) -> Path:
-    """Возвращает модель Piper, при необходимости скачивая её с HuggingFace."""
-    model = Path(model_path) if model_path else piper_model_path()
-    config_path = Path(str(model) + ".json")
-    if piper_model_ready(model):
-        return model
+    """Возвращает модель Piper, при необходимости скачивая её.
 
-    if not bool(getattr(config, "PIPER_AUTO_DOWNLOAD", True)):
-        raise FileNotFoundError(
-            f"нет модели Piper: {model}. Скачайте голос: python download_voices.py"
-        )
+    Явный путь (``model_path``) — это своя модель: её не подменяем голосом из
+    каталога. Без аргумента работает активный голос, и скачиванием занимается
+    ``voices.ensure`` — там же проверяется целостность файлов.
+    """
+    if model_path is not None:
+        model = Path(model_path)
+        if piper_model_ready(model):
+            return model
+        raise FileNotFoundError(f"нет файла модели Piper: {model}")
 
-    log(f"Скачиваю голос Piper «{model.stem}» (около 63 МБ)...", "info")
-    model.parent.mkdir(parents=True, exist_ok=True)
     started = time.time()
-    try:
-        _download_to(str(config.PIPER_MODEL_URL), model)
-        _download_to(str(config.PIPER_CONFIG_URL), config_path)
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"не удалось скачать голос Piper: {exc}. Проверьте интернет или "
-            "выполните python download_voices.py"
-        ) from exc
-
-    # Дешёвая проверка, что скачался именно ONNX, а не страница ошибки.
-    if model.stat().st_size < 1_000_000:
-        model.unlink(missing_ok=True)
-        config_path.unlink(missing_ok=True)
+    model = voices.ensure(voices.active_name(),
+                          on_log=lambda message: log(message, "info"))
+    if not piper_model_ready(model):
         raise RuntimeError("файл модели Piper повреждён (слишком маленький)")
-
     log(f"Голос Piper готов за {time.time() - started:.1f} с: {model.name}", "info")
     return model
+
+
+# =====================================================================
+#  ПАРАМЕТРЫ ГОЛОСА
+# =====================================================================
+def piper_speed() -> float:
+    """Темп речи Piper (1.0 — обычный).
+
+    Пределы 0.5..2.0 — не вкусовщина: за ними VITS начинает «жевать» звуки
+    или растягивать их до неестественности, и разборчивость падает.
+    """
+    raw = getattr(config, "PIPER_SPEED", 1.0)
+    try:
+        speed = 1.0 if raw is None else float(raw)
+    except (TypeError, ValueError):
+        speed = 1.0
+    return min(max(speed, 0.5), 2.0)
+
+
+def piper_volume() -> float:
+    """Громкость синтеза 0..1 с поправкой на конкретный голос.
+
+    ``PIPER_VOLUME`` — пользовательская настройка, а ``voices.effective_volume``
+    умножает её на поправку голоса: разные модели при одинаковом пике звучат с
+    разной громкостью («Сова» на 3.7 дБ громче «Ирины»), и без выравнивания
+    смена голоса воспринималась бы как «стало громче».
+
+    Проверка на ``None`` обязательна: ``volume=0.0`` — законное «выключить
+    звук», а ``raw or 1.0`` превратил бы его в полную громкость.
+    """
+    return voices.effective_volume()
+
+
+def piper_noise() -> tuple:
+    """(noise_scale, noise_w_scale) — вариативность тембра и длительности.
+
+    ``None`` — взять значения из модели. Меньше шума — ровнее голос, больше —
+    живее, но с шероховатостями.
+    """
+    def read(name: str):
+        raw = getattr(config, name, None)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        try:
+            return min(max(float(raw), 0.0), 2.0)
+        except (TypeError, ValueError):
+            return None
+
+    return read("PIPER_NOISE_SCALE"), read("PIPER_NOISE_W")
 
 
 # =====================================================================
@@ -469,6 +537,7 @@ class Speaker:
         self._active_publish = True
         self._lock = threading.RLock()
         self._piper_voice = None
+        self._piper_path: str | None = None
         self._piper_lock = threading.Lock()
         self._sapi_engine = None
         self._sapi_lock = threading.Lock()
@@ -504,7 +573,7 @@ class Speaker:
         if not text:
             return
         if not self.enabled:
-            log(f"Джарвис (текст): {text}", "info")
+            log(f"{config.ASSISTANT_NAME} (текст): {text}", "info")
             if publish:
                 emit_message("assistant", text)
             return
@@ -623,7 +692,7 @@ class Speaker:
                 self._idle.clear()
             if publish:
                 emit_message("assistant", text)
-            log(f"Джарвис: {text}", "info")
+            log(f"{config.ASSISTANT_NAME}: {text}", "info")
             try:
                 spoken = self._speak(text, cancel)
                 if spoken and not cancel.is_set() and callable(self.on_spoken):
@@ -728,17 +797,25 @@ class Speaker:
 
     # ----- piper -----
     def _load_piper_voice(self):
-        """Загружает модель Piper один раз (потокобезопасно)."""
-        if self._piper_voice is not None:
+        """Загружает модель Piper (потокобезопасно) и следит за сменой голоса.
+
+        Модель запоминается вместе с путём: если голос переключили на ходу
+        (``voices.set_active`` меняет ``config.PIPER_VOICE``), старую модель
+        нужно выгрузить — иначе Пятница продолжит говорить прежним голосом до
+        перезапуска, что выглядит как «переключатель не работает».
+        """
+        path = piper_model_path()
+        if self._piper_voice is not None and self._piper_path == str(path):
             return self._piper_voice
         with self._piper_lock:
-            if self._piper_voice is None:
+            if self._piper_voice is None or self._piper_path != str(path):
                 from piper import PiperVoice
 
                 model_path = ensure_piper_model()
                 log(f"Загружаю голос Piper: {model_path.name}", "info")
                 started = time.time()
                 self._piper_voice = PiperVoice.load(str(model_path))
+                self._piper_path = str(model_path)
                 log(f"Голос Piper готов за {time.time() - started:.1f} с.", "debug")
         return self._piper_voice
 
@@ -750,18 +827,22 @@ class Speaker:
         обратным ``length_scale``: 1.2 → быстрее, 0.8 → медленнее. Раньше здесь
         передавался несуществующий ``speed``, исключение глушилось — и настройка
         ``PIPER_SPEED`` молча не работала.
+
+        ``noise_scale`` / ``noise_w_scale`` — вариативность тембра и длительности.
+        ``None`` означает «как в модели»: так настройка не ломает голоса, у
+        которых свои значения записаны в JSON рядом с моделью.
         """
         from piper.config import SynthesisConfig
 
-        speed_raw = getattr(config, "PIPER_SPEED", 1.0)
-        speed = 1.0 if speed_raw is None else float(speed_raw)
-        speed = min(max(speed, 0.5), 2.0)
-        volume_raw = getattr(config, "PIPER_VOLUME", 1.0)
-        # Именно проверка на None: volume=0.0 — это законное «выключить звук»,
-        # а `or 1.0` превратил бы его в полную громкость.
-        volume = 1.0 if volume_raw is None else float(volume_raw)
-        volume = min(max(volume, 0.0), 1.0)
-        return SynthesisConfig(length_scale=1.0 / speed, volume=volume)
+        noise_scale, noise_w = piper_noise()
+        return SynthesisConfig(
+            # Подъём тона укорачивает звук — синтез растягивается на столько же,
+            # иначе голос стал бы не выше, а просто быстрее.
+            length_scale=voices.length_scale(speed=piper_speed()),
+            volume=piper_volume(),
+            noise_scale=noise_scale,
+            noise_w_scale=noise_w,
+        )
 
     @staticmethod
     def _piper_cache_valid(path: Path) -> bool:
@@ -782,11 +863,22 @@ class Speaker:
         voice = self._load_piper_voice()
 
         model_path = piper_model_path()
+        # ВАЖНО: состав ключа повторяет Electron (desktop/src/main/ttsAudio.ts) —
+        # по нему оверлей находит готовый WAV и рисует настоящий спектр. Меняя
+        # порядок или добавляя поля, обновите и его, иначе визуализатор молча
+        # переключится на уровни из SSE. Смена голоса меняет путь к модели, а
+        # значит и ключ: старый кэш чужого голоса не зазвучит. Профиль тембра
+        # сюда не входит — вместо него tts.ensure_tone_cache() сбрасывает кэш
+        # при смене профиля.
         key = _cache_key("piper", text, str(model_path),
                          str(config.PIPER_SPEED), str(config.PIPER_VOLUME))
         out = config.CACHE_DIR / f"{key}.wav"
 
         if not self._piper_cache_valid(out):
+            # Проверяем подпись профиля до синтеза: если тембр сменили, старый
+            # кэш уже удалён и эта фраза соберётся заново. Чтение одного
+            # маленького файла на новую фразу — дешевле, чем неверное звучание.
+            ensure_tone_cache()
             # Синтезируем во временный файл: недописанный WAV не должен попасть
             # в кэш и «озвучиваться» при следующем запросе той же фразы.
             partial = out.with_suffix(".part.wav")
@@ -797,6 +889,9 @@ class Speaker:
                     raise _SpeechCancelled
                 if not self._piper_cache_valid(partial):
                     raise RuntimeError("Piper вернул пустой файл")
+                # Тембр правим до попадания в кэш: иначе каждая фраза
+                # обрабатывалась бы заново при каждом повторе.
+                tone.apply_to_wav(partial, voices.tone_profile())
                 partial.replace(out)
             finally:
                 partial.unlink(missing_ok=True)

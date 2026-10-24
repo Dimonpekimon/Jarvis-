@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Быстрые проверки логики Джарвиса без микрофона и без нейросети.
+"""Быстрые проверки логики Пятницы без микрофона и без нейросети.
 
 Запуск:  python selftest.py
 """
@@ -20,11 +20,13 @@ import actions
 import brain
 import config
 import events
-import jarvis_core
+import pyatnitsa_core
 import make_commands_list
 import make_shortcut
 import speech
+import tone
 import tts
+import voices
 import api
 from actions import (
     _city_alias,
@@ -35,10 +37,11 @@ from actions import (
     parse_duration,
     prepare_expression,
 )
-from jarvis_core import Jarvis
+from pyatnitsa_core import Pyatnitsa
 from responses import ResponseBank
 from speech import Listener
-from utils import CalcError, normalize_command_text, plural_ru, safe_calculate
+from utils import (CalcError, normalize_command_text, plural_ru, safe_calculate,
+                   stem_matches, stem_ru)
 
 PASSED = 0
 FAILED = 0
@@ -59,7 +62,7 @@ def section(title: str) -> None:
 
 
 def main() -> int:
-    print(f"Проверка Джарвиса v{config.APP_VERSION}")
+    print(f"Проверка {config.ASSISTANT_NAME} v{config.APP_VERSION}")
 
     # ---------------- Калькулятор ----------------
     section("Калькулятор (главный исправленный баг)")
@@ -109,7 +112,7 @@ def main() -> int:
 
     # ---------------- Роутинг команд ----------------
     section("Роутинг команд (исправлен приоритет)")
-    jarvis = Jarvis(mode="text", enable_tts=False)
+    pyatnitsa = Pyatnitsa(mode="text", enable_tts=False)
 
     routing_cases = [
         # Главный баг: «выключи компьютер» уходило в громкость.
@@ -146,7 +149,7 @@ def main() -> int:
         ("яркость на 70", "brightness_set"),
         ("таймер на 5 минут", "timer"),
         ("брифинг", "briefing"),
-        # Выключение ассистента. «Отключи» без уточнения — это про Джарвиса,
+        # Выключение ассистента. «Отключи» без уточнения — это про саму Пятницу,
         # а «отключи звук» по-прежнему про звук: совпадение длиннее, значит точнее.
         ("выключайся", "exit"),
         ("выключись", "exit"),
@@ -186,9 +189,54 @@ def main() -> int:
         ("сведения о системе", "system_info"),
     ]
     for phrase, expected_intent in routing_cases:
-        intent, alias = jarvis.match_intent(phrase)
+        intent, alias = pyatnitsa.match_intent(phrase)
         got = intent.name if intent else None
         check(f"«{phrase}»", got, expected_intent)
+
+    # ---------------- Падежи и окончания ----------------
+    # Распознавание речи отдаёт фразу в произнесённой форме, а реестр хранит
+    # один канонический вид. Раньше «закрой окна» и «выключи интерфейса»
+    # уходили нейросети — со стороны это выглядело как «не понял простую
+    # команду». Теперь слова сравниваются по основе (utils.stem_ru).
+    section("Падежи и окончания")
+    check("основа «окна»", stem_ru("окна"), "окн")
+    check("основа «окно»", stem_ru("окно"), "окн")
+    check("основа «закрой»", stem_ru("закрой"), stem_ru("закрою"))
+    check("основа «громкости»", stem_ru("громкости"), stem_ru("громкость"))
+    check("основа «интерфейса»", stem_ru("интерфейса"), stem_ru("интерфейс"))
+    check("основа короткого слова не режется", stem_ru("час"), "час")
+    check("«пока» не совпадает с «показать»",
+          stem_matches(stem_ru("пока"), stem_ru("показать")), False)
+    check("«время» совпадает с «времени»",
+          stem_matches(stem_ru("время"), stem_ru("времени")), True)
+
+    inflection_cases = [
+        ("закрой окна", "close_window"),
+        ("закрой все окна", "close_window"),
+        ("закрой, пожалуйста, все окна", "close_window"),
+        ("закрою окна", "close_window"),
+        ("выключи интерфейса", "exit"),
+        ("закрой интерфейс", "exit"),
+        ("отключайся", "exit"),
+        ("вырубайся", "exit"),
+        ("прибавь громкости", "volume_up"),
+        ("убавь громкости", "volume_down"),
+        ("сделай погромче", "volume_up"),
+        ("запусти роблокс студию", "roblox_studio"),
+        ("выключи музыку", "media_pause"),
+        ("сколько на часах", "time"),
+        ("погаси дисплей", "monitor_off"),
+        ("разбуди через 10 минут", "reminder"),
+        # Фраза не должна «притягиваться» за уши к похожей команде.
+        ("закрой дверь", None),
+        ("включи свет", None),
+        ("открой холодильник", None),
+        ("сколько стоит билет", None),
+        ("что такое квантовая физика", None),
+    ]
+    for phrase, expected_intent in inflection_cases:
+        intent, _alias = pyatnitsa.match_intent(phrase)
+        check(f"«{phrase}»", intent.name if intent else None, expected_intent)
 
     # ---------------- Обработчики команд ----------------
     # Каждая команда из реестра обязана иметь метод-обработчик: без него фраза
@@ -196,14 +244,14 @@ def main() -> int:
     # однажды перестали работать — реестр их знал, а обработчиков не было.
     section("У каждой команды реестра есть обработчик")
     missing_handlers = [
-        intent.name for intent in jarvis_core.INTENTS
-        if not callable(getattr(Jarvis, intent.handler, None))
+        intent.name for intent in pyatnitsa_core.INTENTS
+        if not callable(getattr(Pyatnitsa, intent.handler, None))
     ]
     check("все обработчики из INTENTS существуют", missing_handlers, [])
     check("у каждой команды есть хотя бы один синоним",
-          all(intent.aliases for intent in jarvis_core.INTENTS), True)
+          all(intent.aliases for intent in pyatnitsa_core.INTENTS), True)
     check("имена команд в реестре уникальны",
-          len({intent.name for intent in jarvis_core.INTENTS}), len(jarvis_core.INTENTS))
+          len({intent.name for intent in pyatnitsa_core.INTENTS}), len(pyatnitsa_core.INTENTS))
 
     # ---------------- Новые утилиты ----------------
     section("Утилиты: компьютер и мелочи")
@@ -265,7 +313,7 @@ def main() -> int:
         ("который час", 0),
     ]
     for phrase, expected_parts in compound_cases:
-        check(f"«{phrase}»", len(jarvis._split_compound(phrase)), expected_parts)
+        check(f"«{phrase}»", len(pyatnitsa._split_compound(phrase)), expected_parts)
 
     # ---------------- Извлечение города ----------------
     section("Извлечение города из фразы")
@@ -279,7 +327,7 @@ def main() -> int:
         ("погода Москва", "москва"),
     ]
     for phrase, expected in city_cases:
-        check(f"«{phrase}»", Jarvis._extract_city(phrase), expected)
+        check(f"«{phrase}»", Pyatnitsa._extract_city(phrase), expected)
 
     # ---------------- Нормализация названия города ----------------
     # Геокодер не понимает падежи, а «Питер» трактует буквально
@@ -336,7 +384,7 @@ def main() -> int:
         ("напомни мне через 2 часа проверить почту", "проверить почту"),
     ]
     for phrase, expected in reminder_cases:
-        check(f"«{phrase}»", jarvis._extract_reminder_text(phrase), expected)
+        check(f"«{phrase}»", pyatnitsa._extract_reminder_text(phrase), expected)
 
     # ---------------- Фильтрация распознавания (Vosk) ----------------
     section("Vosk: артефакты, повторы и распознавание")
@@ -374,17 +422,19 @@ def main() -> int:
 
     # ---------------- Снятие слова-активатора ----------------
     section("Снятие слова-активатора")
-    check("джарвис, какая погода", Jarvis._strip_wake_word("джарвис, какая погода"), "какая погода")
-    check("Джарвис который час", Jarvis._strip_wake_word("Джарвис который час"), "который час")
-    check("какая погода", Jarvis._strip_wake_word("какая погода"), "какая погода")
+    check("пятница, какая погода", Pyatnitsa._strip_wake_word("пятница, какая погода"), "какая погода")
+    check("Пятница который час", Pyatnitsa._strip_wake_word("Пятница который час"), "который час")
+    check("какая погода", Pyatnitsa._strip_wake_word("какая погода"), "какая погода")
+    check("слово-активатор — «пятница»", "пятница" in config.WAKE_WORDS, True)
+    check("имя ассистента в промпте", config.ASSISTANT_NAME in config.LLM_SYSTEM_PROMPT, True)
 
     # ---------------- Голосовой цикл ----------------
-    # Правило: одна команда на одно «Джарвис». Проверяем оба пути — когда команда
-    # прозвучала вместе с обращением и когда было сказано только «Джарвис».
-    section("Голосовой цикл: одна команда на одно «Джарвис»")
+    # Первая команда — по обращению. Проверяем оба пути: когда команда
+    # прозвучала вместе с обращением и когда было сказано только «Пятница».
+    section("Голосовой цикл: первая команда по обращению")
 
-    class FakeJarvis(Jarvis):
-        """Джарвис с подменённым слухом: микрофон и Vosk не нужны."""
+    class FakePyatnitsa(Pyatnitsa):
+        """Ассистент с подменённым слухом: микрофон и Vosk не нужны."""
 
         def __init__(self, heard: str, command: str = ""):
             super().__init__(mode="voice", enable_tts=False)
@@ -409,63 +459,125 @@ def main() -> int:
         def _wait_mic_clear(self):
             pass
 
-    one_breath = FakeJarvis("джарвис который час")
+    one_breath = FakePyatnitsa("пятница который час")
     check("команда вместе с обращением идёт сразу",
           one_breath._next_utterance(), "который час")
     check("...без второй записи", one_breath.command_calls, 0)
     check("...без отклика", one_breath.acks, 0)
 
-    bare = FakeJarvis("джарвис", "который час")
-    check("одинокое «Джарвис» ждёт команду", bare._next_utterance(), "который час")
+    bare = FakePyatnitsa("пятница", "который час")
+    check("одинокое «Пятница» ждёт команду", bare._next_utterance(), "который час")
     check("...отклик прозвучал один раз", bare.acks, 1)
     check("...команда записана один раз", bare.command_calls, 1)
 
-    silent = FakeJarvis("")
+    silent = FakePyatnitsa("")
     check("без обращения команды нет", silent._next_utterance(), "")
     check("...и ничего не записывается", silent.command_calls, 0)
 
-    noise = FakeJarvis("джарвис", "ну")
+    noise = FakePyatnitsa("пятница", "ну")
     check("шум вместо команды отброшен", noise._next_utterance(), "")
     check("...но ассистент переспросил", noise.acks, 1)
 
-    # Регрессия: после отклика команда приходила вместе со словом «Джарвис»
+    # Регрессия: после отклика команда приходила вместе со словом-активатором
     # и не совпадала с реестром — ассистент отвечал «не расслышал».
-    dice = FakeJarvis("джарвис подбрось кости")
+    dice = FakePyatnitsa("пятница подбрось кости")
     check("«кости» понимаются сразу, без отклика",
           dice._next_utterance(), "подбрось кости")
     check("...отклик не звучит", dice.acks, 0)
 
-    dice_after_ack = FakeJarvis("джарвис", "джарвис подбрось кости")
+    dice_after_ack = FakePyatnitsa("пятница", "пятница подбрось кости")
     check("повтор команды с обращением очищается",
           dice_after_ack._next_utterance(), "подбрось кости")
     check("...прозвучал один отклик", dice_after_ack.acks, 1)
 
-    unknown = FakeJarvis("джарвис включи музыку")
+    unknown = FakePyatnitsa("пятница включи музыку")
     check("незнакомая просьба уходит нейросети",
           unknown._next_utterance(), "включи музыку")
     check("...без лишнего отклика", unknown.acks, 0)
     check("«кости» — известная команда",
-          jarvis.match_intent("подбрось кости")[0].name, "random_choice")
+          pyatnitsa.match_intent("подбрось кости")[0].name, "random_choice")
 
-    follow_unknown = FakeJarvis("джарвис", "включи музыку")
+    follow_unknown = FakePyatnitsa("пятница", "включи музыку")
     check("просьба после отклика не теряется",
           follow_unknown._next_utterance(), "включи музыку")
 
-    short_noise = FakeJarvis("джарвис", "ну да")
+    short_noise = FakePyatnitsa("пятница", "ну да")
     check("короткий шум после отклика отброшен",
           short_noise._next_utterance(), "")
 
+    # ---------------- Диалог без повторного обращения ----------------
+    # После ответа окно диалога открыто: продолжение принимается молча.
+    section("Диалог без повторного обращения")
+
+    class DialogPyatnitsa(FakePyatnitsa):
+        """Слух с очередью реплик: сначала обращение, потом продолжения."""
+
+        def __init__(self, heard: str, replies):
+            super().__init__(heard)
+            self._queue = list(replies)
+
+        def _listen_command(self, *args, **kwargs):
+            self.command_calls += 1
+            return self._queue.pop(0) if self._queue else ""
+
+    check("диалог включён по умолчанию", config.DIALOG_MODE, True)
+    check("окно продолжения задано", config.DIALOG_FOLLOW_UP_SEC >= 5, True)
+    check("«хватит» — конец диалога", Pyatnitsa._is_dialog_end("хватит"), True)
+    check("«пока» не закрывает диалог", Pyatnitsa._is_dialog_end("пока"), False)
+    check("«а завтра?» — продолжение", pyatnitsa._looks_like_follow_up("а завтра"), True)
+    check("«мне нужно в магазин» — не продолжение",
+          pyatnitsa._looks_like_follow_up("мне нужно в магазин"), False)
+
+    talk = DialogPyatnitsa("пятница который час", ["а завтра", "хватит"])
+    check("первая реплика — по обращению", talk._next_utterance(), "который час")
+    talk._open_dialog()
+    check("окно диалога открылось", talk._dialog_open(), True)
+    check("продолжение понято без оклика", talk._next_utterance(), "а завтра")
+    check("...отклика на обращение не было", talk.acks, 0)
+    check("«хватит» закрывает разговор", talk._next_utterance(), "")
+    check("...окно диалога закрыто", talk._dialog_open(), False)
+
+    quiet = DialogPyatnitsa("пятница который час", [""])
+    quiet._next_utterance()
+    quiet._open_dialog()
+    check("тишина закрывает разговор", quiet._next_utterance(), "")
+    check("...окно диалога закрыто", quiet._dialog_open(), False)
+
+    room = DialogPyatnitsa("пятница который час", ["мне нужно в магазин"])
+    room._next_utterance()
+    room._open_dialog()
+    check("посторонний разговор не считается продолжением",
+          room._next_utterance(), "")
+    check("...и окно закрывается", room._dialog_open(), False)
+
+    back_to_wake = DialogPyatnitsa("пятница который час", [])
+    back_to_wake._next_utterance()
+    back_to_wake._open_dialog()
+    back_to_wake._next_utterance()
+    check("после тишины снова нужно обращение",
+          back_to_wake._next_utterance(), "который час")
+
+    off = config.DIALOG_MODE
+    config.DIALOG_MODE = False
+    try:
+        disabled = DialogPyatnitsa("пятница который час", [])
+        disabled._next_utterance()
+        disabled._open_dialog()
+        check("DIALOG_MODE=False отключает окно", disabled._dialog_open(), False)
+    finally:
+        config.DIALOG_MODE = off
+
     check("отклик есть в банке реплик", ResponseBank.has("wake_ack"), True)
     check("отклик непустой", bool(ResponseBank.get("wake_ack")), True)
-    check("«ну» — не команда", jarvis._looks_like_command("ну"), False)
-    check("«грам» — не команда", jarvis._looks_like_command("грам"), False)
-    check("«погода» — команда", jarvis._looks_like_command("погода"), True)
-    check("свободный вопрос допускается", jarvis._looks_like_command("почему небо синее"), True)
+    check("«ну» — не команда", pyatnitsa._looks_like_command("ну"), False)
+    check("«грам» — не команда", pyatnitsa._looks_like_command("грам"), False)
+    check("«погода» — команда", pyatnitsa._looks_like_command("погода"), True)
+    check("свободный вопрос допускается", pyatnitsa._looks_like_command("почему небо синее"), True)
     check("отклик включается настройкой", config.WAKE_ACK_ENABLED, True)
     check("тишина в конце фразы укорочена", config.SILENCE_SEC <= 0.6, True)
     check("пауза после озвучки задана", config.MIC_CLEAR_GUARD > 0, True)
     check("долгие команды помечены для отбивки",
-          sorted(Jarvis._SLOW_INTENTS),
+          sorted(Pyatnitsa._SLOW_INTENTS),
           ["analyze_screen", "briefing", "read_screen", "search", "weather"])
     check("у оратора общий пульс громкости",
           hasattr(tts.Speaker(enabled=False), "_emit_level"), True)
@@ -476,9 +588,9 @@ def main() -> int:
     check("лимит на поиск города задан", config.WEATHER_DEADLINE <= 10, True)
     # Распознаватель поднимается заранее — до первого обращения к OCR экрана.
     check("чтение экрана поднимает распознаватель заранее",
-          "_warm_recognizer" in inspect.getsource(Jarvis._h_read_screen), True)
+          "_warm_recognizer" in inspect.getsource(Pyatnitsa._h_read_screen), True)
     check("анализ экрана поднимает распознаватель заранее",
-          "_warm_recognizer" in inspect.getsource(Jarvis._h_analyze_screen), True)
+          "_warm_recognizer" in inspect.getsource(Pyatnitsa._h_analyze_screen), True)
 
     # ---------------- Приветствие по времени суток ----------------
     # Ассистент здоровается при запуске по-разному: утром, днём, вечером и ночью.
@@ -508,15 +620,15 @@ def main() -> int:
     check("приветствие всегда непустое",
           all(ResponseBank.startup_greeting(hour) for hour in range(24)), True)
     check("запуск здоровается по времени суток",
-          "startup_greeting" in inspect.getsource(Jarvis.run), True)
+          "startup_greeting" in inspect.getsource(Pyatnitsa.run), True)
 
     # ---------------- Roblox ----------------
     section("Roblox: версии меняются, имя папки не зашито")
     check("у действий есть запуск Roblox", hasattr(actions.Actions, "open_roblox"), True)
-    check("есть обработчик Roblox", hasattr(Jarvis, "_h_roblox"), True)
-    check("есть обработчик Roblox Studio", hasattr(Jarvis, "_h_roblox_studio"), True)
+    check("есть обработчик Roblox", hasattr(Pyatnitsa, "_h_roblox"), True)
+    check("есть обработчик Roblox Studio", hasattr(Pyatnitsa, "_h_roblox_studio"), True)
     check("студийный обработчик просит именно Studio",
-          "studio=True" in inspect.getsource(Jarvis._h_roblox_studio), True)
+          "studio=True" in inspect.getsource(Pyatnitsa._h_roblox_studio), True)
 
     # Roblox при каждом обновлении создаёт новую папку version-<hex>, старые
     # остаются. Проверяем на поддельном LOCALAPPDATA, что берём свежую версию:
@@ -562,27 +674,27 @@ def main() -> int:
           len(documented), len(from_source))
     guide = make_commands_list.build_text()
     check("список не пустой", len(guide) > 2000, True)
-    check("правило «одна команда на одно Джарвис» объяснено",
-          "ОДНА КОМАНДА НА ОДНО" in guide, True)
-    check("папка скриншотов указана", "Скриншоты Джарвиса" in guide, True)
+    check("разговор без оклика объяснён",
+          "БЕЗ ПОВТОРНОГО ОКЛИКА" in guide, True)
+    check("папка скриншотов указана", "Скриншоты Пятницы" in guide, True)
     check("по одной фразе на команду",
           all(guide.count(phrase) >= 1 for _g, _n, phrase, _d in make_commands_list.COMMANDS
               if phrase), True)
     check("файл списка лежит в Документах",
-          config.COMMANDS_FILE.name, "Джарвис — команды.txt")
+          config.COMMANDS_FILE.name, "Пятница — команды.txt")
     check("файл списка создан", config.COMMANDS_FILE.exists(), True)
 
     # ---------------- Имя процесса ----------------
     section("Имя процесса в диспетчере задач")
-    check("имя задано в настройках", config.PROCESS_TITLE, "Джарвис")
-    check("есть функция установки заголовка", hasattr(Jarvis, "_set_process_title"), True)
+    check("имя задано в настройках", config.PROCESS_TITLE, "Пятница")
+    check("есть функция установки заголовка", hasattr(Pyatnitsa, "_set_process_title"), True)
     check("заголовок ставится при запуске",
-          "_set_process_title" in inspect.getsource(Jarvis.run), True)
+          "_set_process_title" in inspect.getsource(Pyatnitsa.run), True)
     check("ярлык готовит копию интерпретатора",
-          hasattr(make_shortcut, "jarvis_exe"), True)
-    check("имя копии — «Джарвис.exe»", make_shortcut.JARVIS_EXE_NAME, "Джарвис.exe")
+          hasattr(make_shortcut, "pyatnitsa_exe"), True)
+    check("имя копии — «Пятница.exe»", make_shortcut.PYATNITSA_EXE_NAME, "Пятница.exe")
     check("копия интерпретатора сделана",
-          (make_shortcut.BASE_DIR / make_shortcut.JARVIS_EXE_NAME).exists(), True)
+          (make_shortcut.BASE_DIR / make_shortcut.PYATNITSA_EXE_NAME).exists(), True)
 
     # ---------------- Интерфейс: шина событий ----------------
     section("Интерфейс: шина событий")
@@ -649,8 +761,13 @@ def main() -> int:
     section("Озвучка: Piper основной")
     check("движок по умолчанию — piper", config.TTS_ENGINE, "piper")
     check("модель Piper на месте", tts.piper_model_ready(), True)
+    # length_scale — обратная скорость, умноженная на подъём тона профиля.
+    # Считаем ожидание из настроек и каталога, иначе тест ломается при смене
+    # темпа или профиля голоса.
+    expected_length = round(voices.length_scale(speed=tts.piper_speed()), 3)
     check("скорость Piper переводится в length_scale",
-          round(tts.Speaker._piper_config().length_scale, 3), 1.0)
+          round(tts.Speaker._piper_config().length_scale, 3), expected_length)
+    check("темп в разумных пределах", 0.5 <= tts.piper_speed() <= 2.0, True)
     silent_speaker = tts.Speaker(enabled=False, engine="auto")
     check("auto начинает с Piper", silent_speaker._engine_order()[0], "piper")
     check("резерв edge и sapi сохранён",
@@ -658,16 +775,161 @@ def main() -> int:
     check("путь к модели скачивается при отсутствии",
           hasattr(tts, "ensure_piper_model"), True)
 
+    # ---------------- Голос: каталог и переключение ----------------
+    section("Голос Пятницы: каталог и переключение")
+
+    check("каталог не пуст", len(voices.VOICE_CATALOG) >= 4, True)
+    check("голос по умолчанию — женский",
+          voices.VOICE_CATALOG[voices.DEFAULT_VOICE]["gender"], "female")
+    check("активный голос есть в каталоге",
+          voices.active_name() in voices.VOICE_CATALOG, True)
+    check("у каждого голоса есть обязательные поля",
+          [k for k in voices.VOICE_CATALOG
+           if not {"title", "gender", "file", "speed"} <= set(voices.VOICE_CATALOG[k])],
+          [])
+    check("путь выводится из имени голоса",
+          voices.model_path("irina").name, "ru_RU-irina-medium.onnx")
+    check("темп голоса в разумных пределах",
+          all(0.5 <= info["speed"] <= 2.0 for info in voices.VOICE_CATALOG.values()), True)
+    check("женский голос скачан", voices.is_installed("irina"), True)
+    check("голос по умолчанию скачан",
+          voices.is_installed(voices.DEFAULT_VOICE), True)
+    check("у каждого голоса есть адрес загрузки",
+          [k for k in voices.VOICE_CATALOG
+           if not voices.remote_url(k).startswith("https://")], [])
+    check("имя файла выводится из ключа, а не из репозитория",
+          voices.model_path("mari").name, "ru_RU-mari-medium.onnx")
+    check("описание показывает пол",
+          "женский" in voices.describe("irina"), True)
+
+    # Смена голоса меняет путь — иначе переключатель был бы бутафорией.
+    saved_voice, saved_model = config.PIPER_VOICE, config.PIPER_MODEL
+    try:
+        config.PIPER_VOICE, config.PIPER_MODEL = "irina", None
+        irina_path = voices.active_path()
+        config.PIPER_VOICE = "dmitri"
+        dmitri_path = voices.active_path()
+        check("смена голоса меняет файл модели",
+              irina_path.name != dmitri_path.name, True)
+        check("путь ведёт в папку голосов",
+              irina_path.parent.name, "voices")
+        # Старые настройки: PIPER_MODEL указывает на конкретный файл, а
+        # PIPER_VOICE ещё не было — голос должен угадаться по имени файла.
+        config.PIPER_VOICE = ""
+        config.PIPER_MODEL = dmitri_path
+        check("старый PIPER_MODEL угадывает голос", voices.active_name(), "dmitri")
+        # Пустая строка и «.» не должны подменять голос текущим каталогом.
+        config.PIPER_MODEL = Path(".")
+        check("пустой путь не ломает выбор",
+              voices.active_path().name, voices.model_path(voices.DEFAULT_VOICE).name)
+    finally:
+        config.PIPER_VOICE, config.PIPER_MODEL = saved_voice, saved_model
+
+    # ---------------- Тембр: обработка после синтеза ----------------
+    section("Тембр: профили обработки")
+
+    check("есть профиль «без обработки»", tone.get("off"), {})
+    check("неизвестный профиль не ломает голос", tone.get("нет-такого"), {})
+    check("у «уверенного» профиля есть компрессор",
+          "compress" in tone.get("confident"), True)
+    check("профиль «мягкий» без компрессора",
+          "compress" in tone.get("soft"), False)
+    check("«бодрый» профиль поднимает тон",
+          tone.get("brisk").get("pitch", 1.0) > 1.0, True)
+    check("«Мари» звучит бодрее без правки настроек",
+          voices.tone_name("mari"), "brisk")
+    check("у голосов без записи обработки нет",
+          voices.tone_profile("irina"), {})
+
+    # Подъём тона и темп независимы: синтез растягивается на столько же,
+    # на сколько пересчёт отсчётов его укорачивает.
+    check("тон голоса берётся из профиля",
+          round(voices.tone_pitch("mari"), 2), 1.10)
+    check("у голоса без профиля тон не меняется",
+          voices.tone_pitch("irina"), 1.0)
+    check("length_scale компенсирует подъём тона",
+          round(voices.length_scale("mari", 1.35), 4), round(1.10 / 1.35, 4))
+    check("length_scale без профиля — просто обратный темп",
+          round(voices.length_scale("irina", 1.2), 4), round(1 / 1.2, 4))
+    # За пределами 0.8..1.35 голос звучит «из бочки» или по-мультяшному.
+    saved_brisk = tone.PROFILES["brisk"]
+    tone.PROFILES["brisk"] = {"pitch": 5.0}
+    try:
+        check("тон ограничен сверху", voices.tone_pitch("mari"), 1.35)
+    finally:
+        tone.PROFILES["brisk"] = saved_brisk
+
+    # Явная настройка сильнее каталога — иначе нельзя сравнить варианты.
+    saved_tone = getattr(config, "PIPER_TONE", "")
+    try:
+        config.PIPER_TONE = "off"
+        check("PIPER_TONE отключает обработку у «Мари»",
+              voices.tone_profile("mari"), {})
+        config.PIPER_TONE = "soft"
+        check("PIPER_TONE перекрывает каталог",
+              voices.tone_name("mari"), "soft")
+        config.PIPER_TONE = "чепуха"
+        check("опечатка в PIPER_TONE возвращает каталожный профиль",
+              voices.tone_name("mari"), "brisk")
+    finally:
+        config.PIPER_TONE = saved_tone
+
+    # Фильтры проверяем на сигнале: пик не должен вырасти, громкость — упасть.
+    if tone.np is not None:
+        import wave as _wave
+        import tempfile as _tempfile
+
+        rate = 22050
+        samples = (0.3 * tone.np.sin(2 * tone.np.pi * 220
+                                     * tone.np.arange(rate) / rate)).astype("float32")
+        shaped = tone.apply(samples, rate, tone.get("confident"))
+        source_rms = float(tone.np.sqrt(tone.np.mean(samples ** 2)))
+        shaped_rms = float(tone.np.sqrt(tone.np.mean(shaped ** 2)))
+        check("компрессор не поднимает пик",
+              float(tone.np.max(tone.np.abs(shaped))) <= 0.3 + 1e-3, True)
+        check("компрессор осаживает ровный тон", shaped_rms < source_rms, True)
+
+        # Подъём тона — пересчёт отсчётов: короче ровно во столько же раз.
+        shifted = tone.apply(samples, rate, {"pitch": 1.1})
+        check("подъём тона укорачивает звук пропорционально",
+              abs(shifted.size - samples.size / 1.1) <= 2, True)
+        check("подъём тона не трогает уровень",
+              abs(float(tone.np.max(tone.np.abs(shifted))) - 0.3) < 0.02, True)
+
+        with _tempfile.TemporaryDirectory() as tmp:
+            wav_path = Path(tmp) / "tone.wav"
+            with _wave.open(str(wav_path), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(rate)
+                handle.writeframes((samples * 32767).astype("int16").tobytes())
+            changed = tone.apply_to_wav(wav_path, tone.get("confident"))
+            with _wave.open(str(wav_path), "rb") as handle:
+                result = tone.np.frombuffer(handle.readframes(handle.getnframes()),
+                                            dtype="int16") / 32768.0
+            check("обработка меняет файл", changed, True)
+            check("громкость файла сохраняется по RMS",
+                  abs(float(tone.np.sqrt(tone.np.mean(result ** 2))) - source_rms) < 0.02,
+                  True)
+            check("без профиля файл не трогается",
+                  tone.apply_to_wav(wav_path, {}), False)
+
+    # Подпись профиля — по ней tts понимает, что кэш устарел.
+    check("подпись профиля различает варианты",
+          tone.signature(tone.get("soft")) != tone.signature(tone.get("confident")),
+          True)
+    check("подпись пустого профиля", tone.signature({}), "off")
+
     # ---------------- Выключение ассистента ----------------
     # Идёт последним: shutdown() глушит общий динамик, после него проверять
     # озвучку уже нечего.
     section("Выключение: «выключайся» гасит и интерфейс")
-    check("есть подписка на выключение", hasattr(Jarvis, "add_shutdown_hook"), True)
+    check("есть подписка на выключение", hasattr(Pyatnitsa, "add_shutdown_hook"), True)
     check("main.py подписывает интерфейс",
           "add_shutdown_hook(ui.stop)" in (config.BASE_DIR / "main.py").read_text("utf-8"),
           True)
 
-    quitting = Jarvis(mode="text", enable_tts=False)
+    quitting = Pyatnitsa(mode="text", enable_tts=False)
     seen = []
     quitting.add_shutdown_hook(lambda: seen.append("ui"))
     quitting.shutdown()

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Тесты Telegram-моста Джарвиса (:mod:`telegram_bot`).
+"""Тесты Telegram-моста Пятницы (:mod:`telegram_bot`).
 
 Полностью изолированы: нет сети, нет реального бота, нет команд ОС и нет
 настоящих токенов. Telegram-объекты (``Update``/``Message``/``Chat``) заменены
@@ -105,7 +105,7 @@ class SplitMessageTests(unittest.TestCase):
             self.assertLessEqual(len(part), TELEGRAM_MAX_MESSAGE_LEN)
 
     def test_join_restores_original_text(self):
-        text = "Джарвис " * 1500
+        text = "Пятница " * 1500
         self.assertEqual("".join(split_message(text)), text)
 
     def test_unicode_and_emoji_not_broken(self):
@@ -333,7 +333,7 @@ class OnMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge._chats, set())
 
     async def test_long_reply_is_split(self):
-        long_reply = "Джарвис " * 1500  # ~12000 символов
+        long_reply = "Пятница " * 1500  # ~12000 символов
         bridge = make_bridge([111], handler=lambda _text: long_reply)
         update = FakeUpdate(user_id=111, text="расскажи")
         await bridge._on_message(update, None)

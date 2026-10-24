@@ -6,20 +6,20 @@
  * общение идёт через узкий мост, описанный в preload.ts.
  */
 
-/** Каналы IPC. Префиксы: jarvis: — данные от Python, ui: — команды интерфейса. */
+/** Каналы IPC. Префиксы: pyatnitsa: — данные от Python, ui: — команды интерфейса. */
 export const CH = {
   // main → renderer
-  event: "jarvis:event", // событие шины Python (message/state/level)
-  audio: "jarvis:audio", // готовый WAV в base64
-  sidecar: "jarvis:sidecar", // состояние процесса Python
-  uiMode: "jarvis:ui-mode", // compact | dialog
-  overlayMode: "jarvis:overlay-mode", // normal | dim
+  event: "pyatnitsa:event", // событие шины Python (message/state/level)
+  audio: "pyatnitsa:audio", // готовый WAV в base64
+  sidecar: "pyatnitsa:sidecar", // состояние процесса Python
+  uiMode: "pyatnitsa:ui-mode", // compact | dialog
+  overlayMode: "pyatnitsa:overlay-mode", // normal | dim
 
   // renderer → main (invoke)
   getConfig: "app:get-config",
-  sendMessage: "jarvis:message",
-  interrupt: "jarvis:interrupt",
-  reset: "jarvis:reset",
+  sendMessage: "pyatnitsa:message",
+  interrupt: "pyatnitsa:interrupt",
+  reset: "pyatnitsa:reset",
   playStub: "audio:play-stub",
   playTts: "audio:play-tts",
 
@@ -91,8 +91,8 @@ export interface SendResult {
   error?: string;
 }
 
-/** То, что preload кладёт в window.jarvis. */
-export interface JarvisBridge {
+/** То, что preload кладёт в window.pyatnitsa. */
+export interface PyatnitsaBridge {
   getConfig(): Promise<AppConfig>;
   sendMessage(text: string): Promise<SendResult>;
   interrupt(): void;

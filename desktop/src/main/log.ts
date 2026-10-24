@@ -16,7 +16,7 @@ function file(): string | null {
   try {
     const dir = app.getPath("logs");
     fs.mkdirSync(dir, { recursive: true });
-    logFile = path.join(dir, "jarvis-overlay.log");
+    logFile = path.join(dir, "pyatnitsa-overlay.log");
   } catch {
     logFile = null;
   }

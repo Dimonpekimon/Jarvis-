@@ -31,7 +31,7 @@ export function ttsCacheDir(): string {
 }
 
 /** Адрес HTTP-API Python-ядра. Порт можно переопределить переменной окружения. */
-export const apiBase = (process.env.JARVIS_API ?? DEFAULT_API_BASE).replace(/\/+$/, "");
+export const apiBase = (process.env.PYATNITSA_API ?? DEFAULT_API_BASE).replace(/\/+$/, "");
 
 export function apiPort(): number {
   try {
@@ -90,7 +90,7 @@ function pythonArgs(): string[] {
   // Окно запускает ядро без своего же окна: --no-desktop. API поднимается на
   // том же порту, по которому к нему подключится этот Electron.
   const args = ["main.py", "--no-desktop", "--api-port", String(apiPort())];
-  const extra = (process.env.JARVIS_PYTHON_ARGS ?? "").trim();
+  const extra = (process.env.PYATNITSA_PYTHON_ARGS ?? "").trim();
   if (extra) args.push(...extra.split(/\s+/));
   return args;
 }
@@ -112,7 +112,7 @@ export function pythonCandidates(): PythonCommand[] {
     if (!duplicate) list.push({ command, prefix, args });
   };
 
-  const explicit = process.env.JARVIS_PYTHON?.trim();
+  const explicit = process.env.PYATNITSA_PYTHON?.trim();
   if (explicit) push(explicit);
 
   // Виртуальное окружение внутри проекта — самый предсказуемый вариант.
@@ -125,5 +125,5 @@ export function pythonCandidates(): PythonCommand[] {
 
 /** Сайдкар можно отключить: приложение тогда работает как «пустой» оверлей. */
 export function sidecarEnabled(): boolean {
-  return process.env.JARVIS_NO_SIDECAR !== "1";
+  return process.env.PYATNITSA_NO_SIDECAR !== "1";
 }

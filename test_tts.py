@@ -411,5 +411,57 @@ class ApiCompatTests(unittest.TestCase):
         self.assertTrue(hasattr(tts.Speaker(enabled=False), "_emit_level"))
 
 
+class ToneCacheTests(unittest.TestCase):
+    """Сброс кэша при смене профиля тембра.
+
+    Опасное место: функция удаляет файлы. Проверяем, что она трогает только
+    WAV в своей папке, не срабатывает повторно и не падает на пустом каталоге.
+    """
+
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp(prefix="tone-cache-"))
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        self._saved = getattr(config, "PIPER_TONE", "")
+        self.addCleanup(setattr, config, "PIPER_TONE", self._saved)
+
+    def _make(self, name: str) -> Path:
+        path = self.directory / name
+        path.write_bytes(b"RIFF")
+        return path
+
+    def test_first_call_stamps_and_clears_wav(self):
+        wav = self._make("a.wav")
+        mp3 = self._make("a.mp3")
+        self.assertTrue(tts.ensure_tone_cache(self.directory))
+        self.assertFalse(wav.exists(), "старый WAV должен быть удалён")
+        self.assertTrue(mp3.exists(), "чужие файлы трогать нельзя")
+        self.assertTrue((self.directory / ".piper-tone").exists())
+
+    def test_second_call_is_noop(self):
+        self._make("a.wav")
+        tts.ensure_tone_cache(self.directory)
+        again = self._make("b.wav")
+        self.assertFalse(tts.ensure_tone_cache(self.directory))
+        self.assertTrue(again.exists(), "при том же профиле кэш не трогаем")
+
+    def test_profile_change_clears_again(self):
+        self._make("a.wav")
+        tts.ensure_tone_cache(self.directory)
+        config.PIPER_TONE = "off"
+        wav = self._make("b.wav")
+        self.assertTrue(tts.ensure_tone_cache(self.directory))
+        self.assertFalse(wav.exists())
+
+    def test_missing_directory_does_not_raise(self):
+        missing = self.directory / "нет-такой"
+        self.assertFalse(tts.ensure_tone_cache(missing))
+
+    def test_generation_tracks_profile(self):
+        config.PIPER_TONE = "off"
+        quiet = tts.tone_generation()
+        config.PIPER_TONE = "confident"
+        self.assertNotEqual(quiet, tts.tone_generation())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

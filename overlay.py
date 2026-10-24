@@ -2,7 +2,7 @@
 """Запуск настольного оверлея (Electron) из main.py.
 
 Python остаётся мозгом и голосом: он поднимает HTTP/SSE-API, а Electron — это
-только окно. Поэтому оверлей запускается с JARVIS_NO_SIDECAR=1: второй экземпляр
+только окно. Поэтому оверлей запускается с PYATNITSA_NO_SIDECAR=1: второй экземпляр
 ядра не нужен, иначе два процесса начнут делить микрофон.
 
 Что делает модуль:
@@ -102,7 +102,7 @@ def _node_install_dirs() -> Iterator[Path]:
 
 def node_path() -> str | None:
     """Путь к node.exe: явная настройка → PATH → стандартные места."""
-    explicit = os.environ.get("JARVIS_NODE")
+    explicit = os.environ.get("PYATNITSA_NODE")
     if explicit and Path(explicit).exists():
         return explicit
     found = shutil.which("node")
@@ -131,7 +131,7 @@ def node_version() -> str | None:
 
 def npm_path() -> str | None:
     """Путь к npm. Ищем рядом с найденным node и в стандартных каталогах."""
-    explicit = os.environ.get("JARVIS_NPM")
+    explicit = os.environ.get("PYATNITSA_NPM")
     if explicit and Path(explicit).exists():
         return explicit
     found = shutil.which("npm")
@@ -254,7 +254,7 @@ def _run(cmd: list[str], timeout: float | None = None) -> bool:
 
 
 NODE_HINT = ("Установите Node.js 20+ с https://nodejs.org (или укажите путь "
-             "переменной JARVIS_NODE), затем запустите: python main.py --rebuild-desktop")
+             "переменной PYATNITSA_NODE), затем запустите: python main.py --rebuild-desktop")
 
 
 def ensure_built(rebuild: bool = False, install: bool = True) -> bool:
@@ -433,8 +433,8 @@ def _launch_once(api_url: str, extra_flags: list[str]) -> subprocess.Popen | Non
     # сторонний --require в его рантайм.
     env.pop("ELECTRON_RUN_AS_NODE", None)
     env.pop("NODE_OPTIONS", None)
-    env["JARVIS_NO_SIDECAR"] = "1"          # Python уже запущен — второй не нужен
-    env["JARVIS_API"] = api_url.rstrip("/")
+    env["PYATNITSA_NO_SIDECAR"] = "1"          # Python уже запущен — второй не нужен
+    env["PYATNITSA_API"] = api_url.rstrip("/")
 
     args = [str(electron), *extra_flags, "."]
 
@@ -454,7 +454,7 @@ def launch(api_url: str, disable_gpu: bool | None = None) -> OverlayProcess | No
     перезапустится автоматически при падении GPU-процесса.
     """
     gpu_off = disable_gpu if disable_gpu is not None else \
-        os.environ.get("JARVIS_DISABLE_GPU") == "1"
+        os.environ.get("PYATNITSA_DISABLE_GPU") == "1"
 
     base_flags: list[str] = ["--disable-gpu"] if gpu_off else []
     known = _load_flags()
@@ -481,7 +481,7 @@ def show_window(api_url: str) -> int | None:
     не следим — нам нужен только факт запуска.
     """
     flags: list[str] = []
-    if os.environ.get("JARVIS_DISABLE_GPU") == "1":
+    if os.environ.get("PYATNITSA_DISABLE_GPU") == "1":
         flags.append("--disable-gpu")
     flags.extend(_load_flags())
 

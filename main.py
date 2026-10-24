@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Точка входа Джарвиса.
+"""Точка входа Пятницы.
 
 Примеры запуска::
 
@@ -7,7 +7,7 @@
     python main.py --text          # только текст
     python main.py --voice         # только голос
     python main.py --no-tts        # без озвучки
-    python main.py --no-wake       # голос без слова-активатора «Джарвис»
+    python main.py --no-wake       # голос без слова-активатора «Пятница»
     python main.py --no-desktop    # без окна: консоль, голос, API ядра
     python main.py --check         # диагностика окружения
     python main.py --list-voices   # доступные голоса
@@ -17,18 +17,18 @@
 браузере нет: Python поднимает API ядра на петлевом адресе, окно рисует
 диалог и визуализатор и общается с ядром по HTTP/SSE.
 
-Фоновый запуск (ярлык «Джарвис» на рабочем столе):
-    ярлык запускает ``Джарвис.exe main.py --background`` — это копия
+Фоновый запуск (ярлык «Пятница» на рабочем столе):
+    ярлык запускает ``Пятница.exe main.py --background`` — это копия
     ``pythonw.exe`` рядом с проектом. Консоли нет, поэтому текстовый ввод не
-    спрашивается, лог пишется в ``data/jarvis.log``, а управление идёт голосом
+    спрашивается, лог пишется в ``data/pyatnitsa.log``, а управление идёт голосом
     и через настольное окно.
 
-    Копия под именем «Джарвис.exe» нужна ради диспетчера задач: он показывает
+    Копия под именем «Пятница.exe» нужна ради диспетчера задач: он показывает
     имя файла, а не заголовок окна, поэтому обычный ``pythonw.exe`` выглядел бы
     как «pythonw.exe». Ярлык и копию создаёт скрипт ``make_shortcut.py``.
 
 Список всех команд для пользователя:
-    ``python make_commands_list.py`` пишет ``Документы/Джарвис — команды.txt``.
+    ``python make_commands_list.py`` пишет ``Документы/Пятница — команды.txt``.
 """
 
 from __future__ import annotations
@@ -51,8 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
     import config
 
     parser = argparse.ArgumentParser(
-        prog="jarvis",
-        description=f"Джарвис v{config.APP_VERSION} — голосовой ассистент для Windows",
+        prog="pyatnitsa",
+        description=f"{config.ASSISTANT_NAME} v{config.APP_VERSION} — голосовой ассистент для Windows",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--mode", choices=["text", "voice", "mixed"],
@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--voice", action="store_true", help="только голосовой ввод")
     parser.add_argument("--no-tts", action="store_true", help="отключить озвучку")
     parser.add_argument("--no-wake", action="store_true",
-                        help="не требовать слово «Джарвис» перед командой")
+                        help="не требовать слово «Пятница» перед командой")
     parser.add_argument("--vosk-model",
                         help="папка или имя модели Vosk (по умолчанию из настроек)")
     parser.add_argument("--voice-name", help="голос edge-tts, например ru-RU-SvetlanaNeural")
@@ -94,7 +94,7 @@ def run_check() -> int:
     import config
 
     print("=" * 64)
-    print("  ДИАГНОСТИКА ДЖАРВИСА")
+    print(f"  ДИАГНОСТИКА {config.ASSISTANT_NAME.upper()}")
     print("=" * 64)
     print(f"Python: {sys.version.split()[0]}  ({sys.executable})")
     print(f"Папка проекта: {config.BASE_DIR}")
@@ -117,11 +117,18 @@ def run_check() -> int:
         vosk_ready = config.VOSK_MODEL_PATH.exists()
     print(f"  Модель на диске:    {'да' if vosk_ready else 'нет, скачается при запуске'}")
     try:
-        from tts import piper_model_ready
-        piper_ready = piper_model_ready()
+        import voices as voice_catalog
+        active_voice = voice_catalog.active_name()
+        piper_ready = voice_catalog.is_installed(active_voice)
+        voice_info = voice_catalog.VOICE_CATALOG[active_voice]
+        voice_label = (f"{voice_info['title']}, "
+                       f"{'женский' if voice_info['gender'] == 'female' else 'мужской'}")
+        tone_label = voice_catalog.tone_name(active_voice)
     except Exception:  # noqa: BLE001
-        piper_ready = config.PIPER_MODEL.exists()
-    print(f"  Озвучка:            {config.TTS_ENGINE} / {Path(config.PIPER_MODEL).stem}")
+        active_voice, piper_ready, voice_label = "неизвестен", False, "неизвестен"
+        tone_label = "off"
+    print(f"  Озвучка:            {config.TTS_ENGINE} / {active_voice} "
+          f"({voice_label}), темп {config.PIPER_SPEED}, тембр {tone_label}")
     print(f"  Голос Piper:        {'да' if piper_ready else 'нет, скачается при запуске'}")
     print(f"  Нейросеть:          {config.GEMINI_MODEL} (Gemini API)")
     print(f"  Telegram:           {'включён' if config.TELEGRAM_ENABLED else 'выключен'}")
@@ -178,7 +185,7 @@ def run_check() -> int:
         print("Все основные компоненты на месте.")
 
     print()
-    print("Ключ Gemini задаётся в jarvis_settings.json -> GEMINI_API_KEY.")
+    print("Ключ Gemini задаётся в pyatnitsa_settings.json -> GEMINI_API_KEY.")
     print("Бесплатный ключ можно получить в Google AI Studio: https://aistudio.google.com/apikey")
     return 0
 
@@ -186,21 +193,14 @@ def run_check() -> int:
 def run_list_voices() -> int:
     """Показывает локальные голоса Piper и, если есть сеть, голоса edge-tts."""
     import config
+    import voices as voice_catalog
 
-    try:
-        from download_voices import VOICES
-    except Exception:  # noqa: BLE001
-        VOICES = {}
-
-    if VOICES:
-        print("Русские голоса Piper (локальные, работают офлайн):")
-        for key, info in VOICES.items():
-            marker = " *" if Path(config.PIPER_MODEL).stem.startswith(
-                Path(info["path"]).name) else ""
-            print(f"  {key:<8} {info['title']}{marker}")
-        print("\nСкачать другой голос:  python download_voices.py irina")
-        print("Выбрать его:           PIPER_MODEL в jarvis_settings.json")
-        print("  * — выбран сейчас")
+    print("Русские голоса Piper (локальные, работают офлайн):")
+    for key in voice_catalog.VOICE_CATALOG:
+        print("  " + voice_catalog.describe(key))
+    print("\nСкачать и выбрать голос:  python voice.py use irina")
+    print("Проверить голос:          python voice.py test")
+    print("  → — выбран сейчас")
 
     if not config.FEATURES["edge_tts"]:
         return 0
@@ -241,23 +241,25 @@ def _running_core(port: int | None) -> str | None:
 def _attach_to_running(base_url: str, no_desktop: bool) -> int:
     """Второй экземпляр не нужен: показываем окно уже работающего ассистента.
 
-    Это и есть поведение ярлыка «Джарвис» на рабочем столе: первый клик
+    Это и есть поведение ярлыка «Пятница» на рабочем столе: первый клик
     запускает всё, повторный — просто возвращает окно на экран (микрофон
     остаётся за первым экземпляром, второй голосовой цикл не стартует).
     """
     from utils import log
 
-    log("Джарвис уже запущен — второй экземпляр не нужен", "info")
+    import config
+
+    log(f"{config.ASSISTANT_NAME} уже запущена — второй экземпляр не нужен", "info")
     log(f"Работающее ядро: {base_url}", "debug")
     if no_desktop:
-        print(f"[i] Джарвис уже работает: {base_url}")
+        print(f"[i] {config.ASSISTANT_NAME} уже работает: {base_url}")
         return 0
 
     import overlay
 
     pid = overlay.show_window(base_url)
     if pid is None:
-        print("[!] Джарвис уже работает, но показать окно не удалось")
+        print(f"[!] {config.ASSISTANT_NAME} уже работает, но показать окно не удалось")
         return 1
     log(f"Показываю окно работающего ассистента (pid={pid})", "info")
     return 0
@@ -285,7 +287,7 @@ def main() -> int:
         print(f"[i] Не удалось создать папку скриншотов: {exc}")
 
     if args.background:
-        # Режим ярлыка на рабочем столе: консоли нет — см. Jarvis.background.
+        # Режим ярлыка на рабочем столе: консоли нет — см. Pyatnitsa.background.
         config.BACKGROUND_MODE = True
         config.LOG_TO_FILE = True
     if args.verbose:
@@ -319,9 +321,9 @@ def main() -> int:
         mode = "voice"
     mode = mode or config.DEFAULT_INPUT_MODE
 
-    from jarvis_core import Jarvis
+    from pyatnitsa_core import Pyatnitsa
 
-    jarvis = Jarvis(
+    pyatnitsa = Pyatnitsa(
         mode=mode,
         enable_tts=not args.no_tts,
         wake_required=False if args.no_wake else None,
@@ -333,11 +335,11 @@ def main() -> int:
     # HTTP/SSE-канал, поэтому API поднимается всегда, даже без окна.
     from api import CoreAPI
 
-    ui = CoreAPI(jarvis, port=api_port)
+    ui = CoreAPI(pyatnitsa, port=api_port)
     if not ui.start():
         print("[!] Не удалось поднять API ядра — окно не сможет подключиться")
     # Команда «выключайся» гасит и ядро, и API, и окно — а не только цикл.
-    jarvis.add_shutdown_hook(ui.stop)
+    pyatnitsa.add_shutdown_hook(ui.stop)
 
     no_desktop = args.no_desktop or args.no_ui
     if no_desktop:
@@ -349,7 +351,7 @@ def main() -> int:
 
         process = overlay.run(ui.url if ui.running else "", rebuild=args.rebuild_desktop)
         if process is not None:
-            jarvis.add_shutdown_hook(process.stop)
+            pyatnitsa.add_shutdown_hook(process.stop)
         else:
             print("[!] Окно не запустилось — работаю в консоли.")
             print("    Проверьте окружение: python main.py --check")
@@ -364,7 +366,7 @@ def main() -> int:
                     pass
 
     try:
-        jarvis.run()
+        pyatnitsa.run()
     except Exception as exc:  # noqa: BLE001
         print(f"\n[Критическая ошибка] {exc}")
         return 1

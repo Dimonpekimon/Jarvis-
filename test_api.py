@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Тесты API ядра Джарвиса (единственный канал связи с настольным окном).
+"""Тесты API ядра Пятницы (единственный канал связи с настольным окном).
 
 Поднимают настоящий HTTP-сервер на 127.0.0.1 с эфемерным портом и бьют по нему
 реальными запросами. Ядро подменено заглушкой: никаких команд ОС, звука и сети,
@@ -58,7 +58,7 @@ class DummySpeaker:
         pass
 
 
-class DummyJarvis:
+class DummyPyatnitsa:
     """Ядро-заглушка: считает вызовы и умеет притормозить первый из них."""
 
     def __init__(self, gate: threading.Event | None = None):
@@ -182,13 +182,13 @@ class ApiTestCase(unittest.TestCase):
                 pass
         api.log = self._real_log
 
-    def start_ui(self, jarvis=None, **kwargs):
-        jarvis = jarvis if jarvis is not None else DummyJarvis()
+    def start_ui(self, pyatnitsa=None, **kwargs):
+        pyatnitsa = pyatnitsa if pyatnitsa is not None else DummyPyatnitsa()
         kwargs.setdefault("port", 0)
-        ui = api.CoreAPI(jarvis, **kwargs)
+        ui = api.CoreAPI(pyatnitsa, **kwargs)
         self.assertTrue(ui.start(), "сервер не поднялся")
         self._uis.append(ui)
-        return ui, jarvis
+        return ui, pyatnitsa
 
     def post(self, ui, path, body, headers=None, content_type="application/json"):
         return http_call(ui.port, "POST", path, body=body, headers=headers,
@@ -247,17 +247,17 @@ class TestOriginGuards(ApiTestCase):
         self.assertTrue(json.loads(body)["ok"])
 
     def test_absent_origin_accepted(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/message", {"text": "привет"})
         self.assertEqual(status, 200)
-        self.assertTrue(wait_for(lambda: jarvis.processed == ["привет"]))
+        self.assertTrue(wait_for(lambda: pyatnitsa.processed == ["привет"]))
 
     def test_foreign_host_rejected(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/message", {"text": "x"},
                               headers={"Host": "evil.example.com"})
         self.assertEqual(status, 403)
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_host_port_mismatch_rejected(self):
         ui, _ = self.start_ui()
@@ -266,7 +266,7 @@ class TestOriginGuards(ApiTestCase):
         self.assertEqual(status, 403)
 
     def test_foreign_origin_rejected(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         for origin in ("http://evil.example.com",
                        f"http://evil.example.com:{ui.port}",
                        "null",
@@ -274,14 +274,14 @@ class TestOriginGuards(ApiTestCase):
             status, _ = self.post(ui, "/api/message", {"text": "x"},
                                   headers={"Origin": origin})
             self.assertEqual(status, 403, f"Origin={origin!r} должен быть отклонён")
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_cross_site_fetch_rejected(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/message", {"text": "x"},
                               headers={"Sec-Fetch-Site": "cross-site"})
         self.assertEqual(status, 403)
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_guard_applies_to_get(self):
         ui, _ = self.start_ui()
@@ -295,21 +295,21 @@ class TestOriginGuards(ApiTestCase):
 # =====================================================================
 class TestBodyValidation(ApiTestCase):
     def test_content_type_required(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/message", '{"text": "x"}',
                               content_type="text/plain")
         self.assertEqual(status, 415)
         status, _ = self.post(ui, "/api/message", '{"text": "x"}',
                               content_type="application/x-www-form-urlencoded")
         self.assertEqual(status, 415)
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_invalid_json_rejected(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         for body in ("not json at all", "[1, 2, 3]", '"строка"', "42"):
             status, _ = self.post(ui, "/api/message", body)
             self.assertEqual(status, 400, f"тело {body!r} должно быть отклонено")
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_non_object_json_rejected(self):
         ui, _ = self.start_ui()
@@ -317,26 +317,26 @@ class TestBodyValidation(ApiTestCase):
         self.assertEqual(status, 400)  # не utf-8
 
     def test_wrong_text_type_rejected(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         for value in (123, True, ["x"], {"a": 1}):
             status, _ = self.post(ui, "/api/message", {"text": value})
             self.assertEqual(status, 400, f"text={value!r} должен быть отклонён")
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_text_too_long_rejected(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/message", {"text": "x" * (api.MAX_TEXT + 1)})
         self.assertEqual(status, 413)
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_empty_text_rejected(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/message", {"text": "   "})
         self.assertEqual(status, 400)
-        self.assertEqual(jarvis.processed, [])
+        self.assertEqual(pyatnitsa.processed, [])
 
     def test_raw_invalid_content_length(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         host = f"127.0.0.1:{ui.port}"
 
         raw = build_raw(ui.port, ["Content-Type: application/json",
@@ -363,17 +363,17 @@ class TestBodyValidation(ApiTestCase):
                                   "Transfer-Encoding: chunked"], body=b"0\r\n\r\n", host=host)
         self.assertEqual(status_of(raw_exchange(ui.port, raw)), 400)
 
-        self.assertEqual(jarvis.processed, [])
-        self.assertEqual(jarvis.speaker.said, [])
+        self.assertEqual(pyatnitsa.processed, [])
+        self.assertEqual(pyatnitsa.speaker.said, [])
 
     def test_rejection_never_reaches_handler(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         self.post(ui, "/api/message", {"text": "x"}, content_type="text/plain")
         self.post(ui, "/api/message", "broken", headers={"Host": "evil.example.com"})
         self.post(ui, "/api/reset", {"x": 1}, headers={"Origin": "http://evil.example.com"})
         time.sleep(0.2)
-        self.assertEqual(jarvis.processed, [])
-        self.assertEqual(jarvis.resets, 0)
+        self.assertEqual(pyatnitsa.processed, [])
+        self.assertEqual(pyatnitsa.resets, 0)
 
 
 # =====================================================================
@@ -382,36 +382,36 @@ class TestBodyValidation(ApiTestCase):
 class TestDispatcher(ApiTestCase):
     def test_fifo_and_single_worker(self):
         gate = threading.Event()
-        jarvis = DummyJarvis(gate=gate)
-        ui, _ = self.start_ui(jarvis)
+        pyatnitsa = DummyPyatnitsa(gate=gate)
+        ui, _ = self.start_ui(pyatnitsa)
 
         for text in ("раз", "два", "три"):
             status, _ = self.post(ui, "/api/message", {"text": text})
             self.assertEqual(status, 200)
 
-        self.assertTrue(jarvis.entered.wait(2.0), "рабочий поток не стартовал")
+        self.assertTrue(pyatnitsa.entered.wait(2.0), "рабочий поток не стартовал")
         gate.set()
-        self.assertTrue(wait_for(lambda: jarvis.processed == ["раз", "два", "три"]),
-                        f"порядок нарушен: {jarvis.processed}")
-        self.assertEqual(jarvis.max_active, 1, "реплики исполнялись параллельно")
+        self.assertTrue(wait_for(lambda: pyatnitsa.processed == ["раз", "два", "три"]),
+                        f"порядок нарушен: {pyatnitsa.processed}")
+        self.assertEqual(pyatnitsa.max_active, 1, "реплики исполнялись параллельно")
 
     def test_reset_shares_queue_order(self):
-        jarvis = DummyJarvis()
-        ui, _ = self.start_ui(jarvis)
+        pyatnitsa = DummyPyatnitsa()
+        ui, _ = self.start_ui(pyatnitsa)
         self.post(ui, "/api/message", {"text": "первое"})
         self.post(ui, "/api/reset", {})
         self.post(ui, "/api/message", {"text": "второе"})
-        self.assertTrue(wait_for(lambda: jarvis.processed == ["первое", "второе"]))
-        self.assertTrue(wait_for(lambda: jarvis.resets == 1))
+        self.assertTrue(wait_for(lambda: pyatnitsa.processed == ["первое", "второе"]))
+        self.assertTrue(wait_for(lambda: pyatnitsa.resets == 1))
 
     def test_queue_saturation_returns_429(self):
         gate = threading.Event()
-        jarvis = DummyJarvis(gate=gate)
-        ui, _ = self.start_ui(jarvis, queue_size=2)
+        pyatnitsa = DummyPyatnitsa(gate=gate)
+        ui, _ = self.start_ui(pyatnitsa, queue_size=2)
 
         first, _ = self.post(ui, "/api/message", {"text": "A"})
         self.assertEqual(first, 200)
-        self.assertTrue(jarvis.entered.wait(2.0))
+        self.assertTrue(pyatnitsa.entered.wait(2.0))
 
         second, _ = self.post(ui, "/api/message", {"text": "B"})
         third, _ = self.post(ui, "/api/message", {"text": "C"})
@@ -421,12 +421,12 @@ class TestDispatcher(ApiTestCase):
         self.assertFalse(json.loads(body)["ok"])
 
         gate.set()
-        self.assertTrue(wait_for(lambda: jarvis.processed == ["A", "B", "C"]))
+        self.assertTrue(wait_for(lambda: pyatnitsa.processed == ["A", "B", "C"]))
 
     def test_stop_restart_finite(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         self.post(ui, "/api/message", {"text": "один"})
-        self.assertTrue(wait_for(lambda: jarvis.processed == ["один"]))
+        self.assertTrue(wait_for(lambda: pyatnitsa.processed == ["один"]))
 
         ui.stop()
         self.assertFalse(ui.running)
@@ -434,21 +434,21 @@ class TestDispatcher(ApiTestCase):
 
         self.assertTrue(ui.start(), "повторный старт не удался")
         self.post(ui, "/api/message", {"text": "два"})
-        self.assertTrue(wait_for(lambda: jarvis.processed == ["один", "два"]))
+        self.assertTrue(wait_for(lambda: pyatnitsa.processed == ["один", "два"]))
 
     def test_stop_drops_pending(self):
         gate = threading.Event()
-        jarvis = DummyJarvis(gate=gate)
-        ui, _ = self.start_ui(jarvis)
+        pyatnitsa = DummyPyatnitsa(gate=gate)
+        ui, _ = self.start_ui(pyatnitsa)
 
         self.post(ui, "/api/message", {"text": "A"})
-        self.assertTrue(jarvis.entered.wait(2.0))
+        self.assertTrue(pyatnitsa.entered.wait(2.0))
         self.post(ui, "/api/message", {"text": "B"})   # копится в очереди
 
         ui.stop()
         gate.set()
         time.sleep(0.3)
-        self.assertNotIn("B", jarvis.processed, "отложенная реплика не должна исполниться")
+        self.assertNotIn("B", pyatnitsa.processed, "отложенная реплика не должна исполниться")
 
 
 # =====================================================================
@@ -456,16 +456,16 @@ class TestDispatcher(ApiTestCase):
 # =====================================================================
 class TestSpeak(ApiTestCase):
     def test_speak_uses_publish_false(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/speak", {"text": "исправленный ответ"})
         self.assertEqual(status, 200)
-        self.assertEqual(jarvis.speaker.said, [("исправленный ответ", False)])
+        self.assertEqual(pyatnitsa.speaker.said, [("исправленный ответ", False)])
 
     def test_interrupt_calls_speaker_stop(self):
-        ui, jarvis = self.start_ui()
+        ui, pyatnitsa = self.start_ui()
         status, _ = self.post(ui, "/api/interrupt", {})
         self.assertEqual(status, 200)
-        self.assertEqual(jarvis.speaker.stop_calls, 1)
+        self.assertEqual(pyatnitsa.speaker.stop_calls, 1)
 
 
 # =====================================================================
@@ -473,11 +473,11 @@ class TestSpeak(ApiTestCase):
 # =====================================================================
 class TestLegacyApi(ApiTestCase):
     def test_submit_message_without_dispatcher(self):
-        jarvis = DummyJarvis()
-        accepted = api.submit_message(jarvis, "старый вызов")
+        pyatnitsa = DummyPyatnitsa()
+        accepted = api.submit_message(pyatnitsa, "старый вызов")
         self.assertTrue(accepted)
-        self.assertTrue(wait_for(lambda: jarvis.processed == ["старый вызов"]))
-        dispatcher = api._legacy_dispatchers.get(id(jarvis))
+        self.assertTrue(wait_for(lambda: pyatnitsa.processed == ["старый вызов"]))
+        dispatcher = api._legacy_dispatchers.get(id(pyatnitsa))
         if dispatcher is not None:
             dispatcher.stop()
 

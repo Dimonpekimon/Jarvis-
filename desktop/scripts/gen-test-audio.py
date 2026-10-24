@@ -20,7 +20,7 @@ DESKTOP = Path(__file__).resolve().parent.parent
 PROJECT = DESKTOP.parent
 OUT = DESKTOP / "src" / "renderer" / "public" / "test-voice.wav"
 
-PHRASE = "Джарвис на связи. Визуализация работает."
+PHRASE = "Пятница на связи. Визуализация работает."
 
 
 def main() -> int:

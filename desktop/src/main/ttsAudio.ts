@@ -27,7 +27,9 @@ export interface TtsSettings {
   useCache: boolean;
 }
 
-const SETTINGS_FILE = "jarvis_settings.json";
+const SETTINGS_FILE = "pyatnitsa_settings.json";
+/** До переименования настройки лежали под этим именем — читаем как запасной. */
+const LEGACY_SETTINGS_FILE = "jarvis_settings.json";
 
 /** Достаёт числовой литерал из JSON как есть, сохраняя «1.0». */
 function rawNumber(text: string, key: string, fallback: string): string {
@@ -41,23 +43,36 @@ export function readTtsSettings(): TtsSettings | null {
   try {
     text = fs.readFileSync(file, "utf8");
   } catch {
-    log("debug", "jarvis_settings.json не найден — мост аудио выключен");
-    return null;
+    try {
+      text = fs.readFileSync(path.join(pythonRoot(), LEGACY_SETTINGS_FILE), "utf8");
+    } catch {
+      log("debug", "pyatnitsa_settings.json не найден — мост аудио выключен");
+      return null;
+    }
   }
 
   let parsed: Record<string, unknown> = {};
   try {
     parsed = JSON.parse(text) as Record<string, unknown>;
   } catch {
-    log("warn", "jarvis_settings.json не разобрался как JSON");
+    log("warn", "pyatnitsa_settings.json не разобрался как JSON");
   }
 
-  const storedModel = typeof parsed.PIPER_MODEL === "string" ? parsed.PIPER_MODEL : "";
-  const modelPath = storedModel || path.join(pythonRoot(), "data", "voices", "ru_RU-dmitri-medium.onnx");
+  // Голос выбирается именем (PIPER_VOICE), а путь выводится из него — ровно
+  // как в voices.active_path(). Пустой PIPER_MODEL означает «по имени голоса»:
+  // раньше здесь был жёстко прописан dmitri, и после перехода на женский голос
+  // ключ кэша перестал бы совпадать, а визуализатор — находить звук.
+  const storedModel = typeof parsed.PIPER_MODEL === "string" ? parsed.PIPER_MODEL.trim() : "";
+  const voiceName = typeof parsed.PIPER_VOICE === "string" ? parsed.PIPER_VOICE.trim().toLowerCase() : "";
+  const safeVoice = /^[a-z0-9_-]+$/.test(voiceName) ? voiceName : "irina";
+  const modelPath =
+    storedModel || path.join(pythonRoot(), "data", "voices", `ru_RU-${safeVoice}-medium.onnx`);
 
   return {
     modelPath,
-    speed: rawNumber(text, "PIPER_SPEED", "1.0"),
+    // Запасное значение повторяет config.PIPER_SPEED: если в настройках ключа
+    // нет, Python хеширует именно это число.
+    speed: rawNumber(text, "PIPER_SPEED", "1.2"),
     volume: rawNumber(text, "PIPER_VOLUME", "1.0"),
     useCache: /"TTS_USE_CACHE"\s*:\s*true/.test(text),
   };

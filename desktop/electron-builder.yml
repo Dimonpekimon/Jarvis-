@@ -1,6 +1,6 @@
 # Сборка установщика: npm run dist
-appId: ru.dima.jarvis.desktop
-productName: JarvisOverlay
+appId: ru.dima.pyatnitsa.desktop
+productName: PyatnitsaOverlay
 copyright: Copyright © 2026 dima
 
 directories:
@@ -21,7 +21,7 @@ extraResources:
     filter:
       - "*.py"
       - "requirements.txt"
-      - "jarvis_settings.example.json"
+      - "pyatnitsa_settings.example.json"
       - "!desktop/**"
       - "!data/**"
       - "!outputs/**"
@@ -49,5 +49,5 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: Jarvis Overlay
+  shortcutName: Пятница Overlay
   deleteAppDataOnUninstall: false

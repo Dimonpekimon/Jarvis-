@@ -42,18 +42,18 @@ import { waitForWav } from "./ttsAudio";
 // AudioContext в Electron стартует «спящим» до жеста пользователя; для оверлея
 // это неприемлемо — звук должен играть по событию из Python.
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
-app.setAppUserModelId("ru.dima.jarvis.desktop");
+app.setAppUserModelId("ru.dima.pyatnitsa.desktop");
 
 // Аварийный выключатель для машин, где драйвер роняет GPU-процесс (в логе это
 // «GPU process exited unexpectedly» + «GPU process isn't usable. Goodbye.»).
 // Живопись Canvas на CPU медленнее, но окно хотя бы открывается.
-if (process.env.JARVIS_DISABLE_GPU === "1") {
+if (process.env.PYATNITSA_DISABLE_GPU === "1") {
   app.disableHardwareAcceleration();
 }
 
-const DEV_URL = process.env.JARVIS_DEV_URL ?? "http://127.0.0.1:5273";
+const DEV_URL = process.env.PYATNITSA_DEV_URL ?? "http://127.0.0.1:5273";
 /** Грузить страницу с Vite-сервера (HMR) или из готовой сборки. */
-const useDevServer = process.env.JARVIS_DEV === "1";
+const useDevServer = process.env.PYATNITSA_DEV === "1";
 const MARGIN = 24; // отступ от края экрана
 const DIM_OPACITY = 0.35; // «полупрозрачный» режим
 
@@ -97,7 +97,7 @@ function createWindow(): void {
     fullscreenable: false,
     skipTaskbar: true, // оверлею не место на панели задач
     alwaysOnTop: true,
-    title: "Jarvis Overlay",
+    title: "Пятница — оверлей",
     webPreferences: {
       preload: path.join(__dirname, "..", "preload", "preload.js"),
       contextIsolation: true,
@@ -281,7 +281,7 @@ function rebuildTrayMenu(): void {  if (!tray) return;
     { label: "Выход", click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
-  tray.setToolTip(`Джарвис — ${apiReady ? "ядро на связи" : "ядро не отвечает"}`);
+  tray.setToolTip(`Пятница — ${apiReady ? "ядро на связи" : "ядро не отвечает"}`);
 }
 
 function registerShortcuts(): void {

@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Telegram-бот Джарвиса.
+"""Telegram-бот Пятницы.
 
 Позволяет отдавать команды ассистенту с телефона и получать ответы текстом.
 Работает в отдельном потоке, чтобы не мешать голосовому циклу.
 
-Включение: в ``jarvis_settings.json`` задайте::
+Включение: в ``pyatnitsa_settings.json`` задайте::
 
     "TELEGRAM_ENABLED": true,
     "TELEGRAM_TOKEN": "123456:ABC...",
@@ -63,7 +63,7 @@ def split_message(text: str, limit: int = TELEGRAM_MAX_MESSAGE_LEN) -> list[str]
 
 
 class TelegramBridge:
-    """Мост между Telegram и ядром Джарвиса."""
+    """Мост между Telegram и ядром Пятницы."""
 
     def __init__(self, handler, status_provider=None, reset_callback=None):
         self.handler = handler                 # callable(text) -> str
@@ -122,7 +122,7 @@ class TelegramBridge:
             return
         self._chats.add(update.effective_chat.id)
         await update.message.reply_text(
-            "Джарвис на связи, сэр. Пишите команду обычным текстом — "
+            f"{config.ASSISTANT_NAME} на связи, сэр. Пишите команду обычным текстом — "
             "например «погода в Москве», «громче», «напомни через 10 минут позвонить маме».\n\n"
             "Команды: /status — состояние систем, /reset — очистить историю диалога."
         )
@@ -176,7 +176,7 @@ class TelegramBridge:
         if not self.allowed_users:
             log(
                 "Не задан TELEGRAM_ALLOWED_USERS — бот не запущен: доступ закрыт "
-                "по умолчанию. Укажите свой числовой Telegram ID в jarvis_settings.json.",
+                "по умолчанию. Укажите свой числовой Telegram ID в pyatnitsa_settings.json.",
                 "warn",
             )
             return False
