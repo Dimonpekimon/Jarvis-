@@ -30,7 +30,7 @@ from brain import Brain, BrainUnavailable
 from events import emit_message, emit_state
 from responses import ResponseBank
 from scheduler import Scheduler
-from speech import Listener, SpeechError
+from speech import Listener, SpeechError, engine_label
 from telegram_bot import TelegramBridge
 from tts import get_speaker
 from utils import (contains_word, log, normalize_command_text, normalize_text,
@@ -968,11 +968,11 @@ class Pyatnitsa:
     def _warm_recognizer(self) -> None:
         """Поднимает распознаватель заранее — до первого обращения к OCR экрана.
 
-        Загрузка модели Vosk занимает около секунды, и без прогрева она
-        пришлась бы на первую команду. Кроме того, ранняя инициализация
-        распознавателя перед импортом ``winrt`` (движок OCR Windows) избавляет
-        от старой проблемы с падением процесса при обратном порядке — теперь
-        распознавание работает на Vosk, но порядок оставляем безопасным.
+        Загрузка модели (GigaAM на CPU — доли секунды после прогрева, Vosk —
+        около секунды) иначе пришлась бы на первую команду. Кроме того, ранняя
+        инициализация распознавателя перед импортом ``winrt`` (движок OCR
+        Windows) избавляет от старой проблемы с падением процесса при
+        обратном порядке — порядок оставляем безопасным.
 
         В текстовом режиме распознаватель не нужен — там ничего не делаем.
         """
@@ -1183,7 +1183,7 @@ class Pyatnitsa:
                         if config.DIALOG_MODE else "выключен")
         return (
             f"Режим: {self.mode}. "
-            f"Распознавание: Vosk «{config.VOSK_MODEL_NAME}» ({speech_state}). "
+            f"Распознавание: {engine_label()} ({speech_state}). "
             f"Озвучка: {tts_engines}"
             + (f", голос {voice_label}" if voice_label else "") + ". "
             f"Мозг: {'работает' if brain_ok else 'недоступен'} — {brain_message} "
@@ -1197,7 +1197,7 @@ class Pyatnitsa:
     def _print_banner(self) -> None:
         log("=" * 62, "info")
         log(f"  {config.ASSISTANT_NAME.upper()} v{config.APP_VERSION} — голосовой ассистент", "info")
-        log(f"  Режим: {self.mode} | Vosk: {config.VOSK_MODEL_NAME} | "
+        log(f"  Режим: {self.mode} | {engine_label()} | "
             f"Модель: {config.GEMINI_MODEL}", "info")
         if self.background:
             log("  Фоновый запуск (ярлык на рабочем столе): без консоли, "
@@ -1207,8 +1207,22 @@ class Pyatnitsa:
     # ==================================================================
     #  ГЛАВНЫЙ ЦИКЛ
     # ==================================================================
+    @staticmethod
+    def _prefetch_requests() -> None:
+        """Фоновая подгрузка requests — импорт стоит ~0.2 с.
+
+        Старт её не ждёт: если модуль понадобится раньше, обычный ``import``
+        в рабочем коде просто дождётся того же лока импорта.
+        """
+        try:
+            import requests  # noqa: F401
+        except Exception:  # noqa: BLE001
+            pass
+
     def _voice_available(self) -> bool:
-        return config.FEATURES["sounddevice"] and config.FEATURES["vosk"]
+        # Движок распознавания — GigaAM (onnx-asr) либо резервный Vosk.
+        return bool(config.FEATURES["sounddevice"]
+                    and (config.FEATURES.get("gigaam") or config.FEATURES.get("vosk")))
 
     def _ensure_listener(self) -> Listener:
         if self.listener is None:
@@ -1517,30 +1531,60 @@ class Pyatnitsa:
     def run(self) -> None:
         self._set_process_title()
         self._print_banner()
-        # Голос Piper грузится около двух секунд: поднимаем его в фоне, пока
-        # идёт калибровка микрофона, чтобы приветствие не ждало загрузку.
-        self.speaker.warmup()
-
-        # Без микрофона или Vosk голосовой режим невозможен — уходим в текст.
+        # Без микрофона и движка распознавания голосовой режим невозможен.
         if self.mode != "text" and not self._voice_available():
-            log("Голосовой ввод недоступен (нет sounddevice или vosk) — "
-                "перехожу в текстовый режим.", "warn")
+            log("Голосовой ввод недоступен (нет sounddevice или движка "
+                "распознавания) — перехожу в текстовый режим.", "warn")
             self.mode = "text"
 
         restored = self.scheduler.restore()
         if restored:
             log(f"Восстановлено напоминаний: {restored}.", "info")
 
-        if self.mode != "text":
+        listener = self._ensure_listener() if self.mode != "text" else None
+        if listener is not None:
+            # sounddevice поднимаем ДО загрузки Piper: импорт под нагрузкой
+            # (модель голоса грузится в соседнем потоке и держит GIL) растягивается
+            # с 0.12 до 1.6 с — это и была заметная пауза перед калибровкой.
+            listener.warm_audio()
+
+        preload_thread = None
+        if listener is not None:
             emit_state("loading")
-            self._ensure_listener().preload_model()
-            self.listener.calibrate()
+            # Модель распознавания (1-3 с) и калибровка микрофона (1-2 с) друг от
+            # друга не зависят: калибровка только слушает тишину, модель только
+            # читается с диска. Раньше они шли последовательно, и старт
+            # растягивался на их сумму — теперь укладывается в большее из двух.
+            # Поток распознавания стартует ПЕРВЫМ: загрузка Piper держит GIL и
+            # иначе отодвигает её на полторы секунды.
+            preload_thread = threading.Thread(target=listener.preload_model,
+                                              name="asr-preload", daemon=True)
+            preload_thread.start()
+
+        # Голос Piper грузится около двух секунд: поднимаем его в фоне, пока
+        # идёт калибровка микрофона, чтобы приветствие не ждало загрузку.
+        self.speaker.warmup()
+        # requests нужен первому же сетевому запросу (мозг, погода, поиск).
+        # Грузим его в фоне: старт не ждёт, а первая команда не платит за импорт.
+        threading.Thread(target=self._prefetch_requests, name="prefetch",
+                         daemon=True).start()
+
+        if listener is not None:
+            # Калибровку делаем до приветствия: иначе микрофон измерит
+            # собственную речь Пятницы и поднимет порог тишины.
+            listener.calibrate()
 
         if self.telegram.start():
             log("Telegram-бот активен.", "info")
 
         # Приветствие по времени суток: «Доброе утро, сэр» / «Добрый вечер, сэр».
+        # Говорим его сразу: модель распознавания догружается в фоне и к первому
+        # обращению обычно уже готова.
         self.speaker.say(ResponseBank.startup_greeting())
+        if preload_thread is not None:
+            preload_thread.join(timeout=60.0)
+            if preload_thread.is_alive():
+                log("Модель распознавания всё ещё грузится — слушаю дальше.", "warn")
 
         try:
             while self._running:

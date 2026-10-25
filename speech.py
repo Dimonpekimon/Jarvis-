@@ -1,11 +1,18 @@
 # -*- coding: utf-8 -*-
-"""Распознавание речи Пятницы на Vosk.
+"""Слух Пятницы: микрофон + распознавание речи.
 
 Запись звука — через ``sounddevice`` с VAD-детектором (останавливаемся, когда
-пользователь замолчал). Распознавание — локальный **Vosk**: небольшая русская
-модель (~45 МБ) работает на CPU за доли секунды и не требует интернета после
-первого скачивания. Модель кладётся в ``data/models`` и при отсутствии
-скачивается автоматически.
+пользователь замолчал). Распознавание — локальный движок, выбранный в
+``config.ASR_ENGINE``:
+
+* **GigaAM v3 RNN-T** (по умолчанию) — модель Сбера на ONNX Runtime, точнее и
+  устойчивее на русском. Вся работа с ней — в :mod:`gigaam_asr`; здесь только
+  точка вызова, поэтому остальной код (ядро, API, интерфейс) не меняется.
+* **Vosk** — резерв, если ``onnx-asr`` не установлен. Оставлен как аварийный
+  путь: он легче и работает даже на совсем слабом железе.
+
+Оба движка принимают один и тот же int16-буфер 16 кГц и возвращают строку,
+поэтому выше по стеку разницы между ними нет.
 """
 
 from __future__ import annotations
@@ -14,7 +21,6 @@ import json
 import re
 import threading
 import time
-import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -28,11 +34,20 @@ try:
 except ImportError:
     HAS_NUMPY = False
 
-try:
-    import sounddevice as sd
-    HAS_SD = True
-except ImportError:
-    HAS_SD = False
+# sounddevice импортируется по требованию (≈120 мс и 8 МБ на старте): нужен
+# только для записи с микрофона, а в текстовом режиме не нужен вовсе.
+# Наличие пакета проверяет config.FEATURES — это find_spec, без загрузки.
+HAS_SD = bool(config.FEATURES.get("sounddevice"))
+_SD = None
+
+
+def _sd():
+    """Модуль sounddevice (None, если его нет). Кэшируется после импорта."""
+    global _SD
+    if _SD is None and HAS_SD:
+        import sounddevice
+        _SD = sounddevice
+    return _SD
 
 # Типичные артефакты распознавания на тишине и шуме — отбрасываем их.
 _ARTIFACTS = (
@@ -55,6 +70,83 @@ _MODEL_MARKER = Path("conf") / "model.conf"
 
 class SpeechError(RuntimeError):
     """Проблема с записью, моделью или распознаванием."""
+
+
+# =====================================================================
+#  ВЫБОР ДВИЖКА
+# =====================================================================
+_ENGINES = ("gigaam", "vosk")
+_WARNED: set[str] = set()
+
+
+def _warn_once(key: str, message: str) -> None:
+    """Одна и та же предупреждение — один раз за процесс, не в каждом вызове."""
+    if key in _WARNED:
+        return
+    _WARNED.add(key)
+    log(message, "warn")
+
+
+def resolve_engine() -> str:
+    """Какой движок распознавания реально доступен: gigaam | vosk | none.
+
+    ``config.ASR_ENGINE`` — это пожелание, а не гарантия: если пакет не
+    установлен, движок честно понижается до резервного, а ассистент
+    продолжает работать (лучше Vosk, чем совсем без слуха).
+    """
+    requested = str(getattr(config, "ASR_ENGINE", "gigaam") or "gigaam").strip().lower()
+    if requested not in _ENGINES + ("auto", ""):
+        _warn_once("bad-engine", f"Неизвестный ASR_ENGINE «{requested}» — беру gigaam.")
+        requested = "gigaam"
+
+    gigaam_ok = bool(config.FEATURES.get("gigaam"))
+    vosk_ok = bool(config.FEATURES.get("vosk"))
+
+    if requested == "gigaam":
+        if gigaam_ok:
+            return "gigaam"
+        _warn_once(
+            "no-gigaam",
+            "GigaAM недоступен (pip install \"onnx-asr[cpu,hub]\") — "
+            + ("перехожу на Vosk." if vosk_ok else "распознавание речи выключено."),
+        )
+        return "vosk" if vosk_ok else "none"
+
+    if requested == "vosk":
+        if vosk_ok:
+            return "vosk"
+        _warn_once("no-vosk", "Vosk не установлен: pip install vosk")
+        return "none"
+
+    # auto / пусто: сначала GigaAM, потом резерв.
+    if gigaam_ok:
+        return "gigaam"
+    return "vosk" if vosk_ok else "none"
+
+
+def engine_label() -> str:
+    """Имя движка для статуса, баннера и диагностики."""
+    engine = resolve_engine()
+    if engine == "gigaam":
+        quant = "INT8" if getattr(config, "GIGAAM_QUANTIZATION", None) else "FP32"
+        return f"GigaAM v3 RNN-T ({quant})"
+    if engine == "vosk":
+        return f"Vosk «{config.VOSK_MODEL_NAME}»"
+    return "нет (движок распознавания не установлен)"
+
+
+def asr_model_ready() -> bool:
+    """Есть ли на диске модель активного движка (без загрузки в память)."""
+    engine = resolve_engine()
+    if engine == "gigaam":
+        try:
+            from gigaam_asr import recognizer_from_config
+            return recognizer_from_config().files_present()
+        except Exception:                              # noqa: BLE001
+            return False
+    if engine == "vosk":
+        return model_ready()
+    return False
 
 
 # =====================================================================
@@ -128,6 +220,10 @@ def ensure_model(path: Path | None = None, *, allow_download: bool | None = None
 
 def _download(url: str, destination: Path) -> None:
     """Скачивает файл с прогрессом в лог. Недокачанный файл не оставляем."""
+    # urllib.request тянет ssl и http.client (~40 мс) — нужен только при
+    # скачивании модели Vosk, поэтому импортируется здесь, а не на уровне модуля.
+    import urllib.request
+
     partial = destination.with_suffix(destination.suffix + ".part")
     partial.unlink(missing_ok=True)
     downloaded = 0
@@ -167,7 +263,12 @@ def _find_model_dir(root: Path) -> Path | None:
 #  Слушатель
 # =====================================================================
 class Listener:
-    """Микрофон + Vosk."""
+    """Микрофон + выбранный движок распознавания (GigaAM или Vosk).
+
+    Публичный контракт не изменился: ``record_until_silence``, ``transcribe``,
+    ``listen_wake``, ``listen_command``, ``model_ready``. Именно поэтому замена
+    движка не требует правок ни в ядре, ни в API, ни в интерфейсе.
+    """
 
     def __init__(self, model_path_arg: str | None = None):
         if model_path_arg:
@@ -176,10 +277,15 @@ class Listener:
                 self.model_path = config.BASE_DIR / self.model_path
         else:
             self.model_path = model_path()
-        self.sample_rate = int(config.VOSK_SAMPLE_RATE)
+        # Частота микрофона. Оба движка хотят 16 кГц моно; если карта отдаёт
+        # 44.1/48 кГц, gigaam_asr сам делает ресемплинг (soxr).
+        self.sample_rate = int(getattr(config, "SAMPLE_RATE", config.VOSK_SAMPLE_RATE))
         self.noise_floor = 0.015
-        self._model = None
+        self.engine = resolve_engine()
+        self._model = None            # Vosk
         self._vosk = None
+        self._asr = None              # GigaAM
+        self._asr_lock = threading.Lock()
         self._model_lock = threading.Lock()
         self._busy = threading.Lock()
 
@@ -188,26 +294,61 @@ class Listener:
     # ------------------------------------------------------------------
     @property
     def model_ready(self) -> bool:
+        if self.engine == "gigaam":
+            return bool(self._asr is not None and self._asr.model_ready)
         return self._model is not None
 
     @property
     def model_name(self) -> str:
+        if self.engine == "gigaam":
+            if self._asr is not None:
+                return self._asr.model_name
+            return str(getattr(config, "GIGAAM_MODEL_NAME", "gigaam-v3-rnnt"))
         return self.model_path.name
 
     def preload_model(self) -> bool:
-        """Загружает модель Vosk (при необходимости скачивает её)."""
-        if not config.FEATURES["vosk"]:
-            log("Vosk не установлен: pip install vosk", "warn")
-            return False
-        try:
-            self._ensure_model()
-            return True
-        except SpeechError as exc:
-            log(str(exc), "error")
-            return False
-        except Exception as exc:  # noqa: BLE001
-            log(f"Не удалось загрузить модель Vosk: {exc}", "error")
-            return False
+        """Грузит модель активного движка (GigaAM при первом запуске скачает её)."""
+        if self.engine == "gigaam":
+            try:
+                return self._ensure_asr().preload()
+            except SpeechError as exc:
+                log(str(exc), "error")
+                return False
+            except Exception as exc:                   # noqa: BLE001
+                log(f"Не удалось загрузить GigaAM: {exc}", "error")
+                return False
+
+        if self.engine == "vosk":
+            if not config.FEATURES["vosk"]:
+                log("Vosk не установлен: pip install vosk", "warn")
+                return False
+            try:
+                self._ensure_model()
+                return True
+            except SpeechError as exc:
+                log(str(exc), "error")
+                return False
+            except Exception as exc:                   # noqa: BLE001
+                log(f"Не удалось загрузить модель Vosk: {exc}", "error")
+                return False
+
+        log("Движок распознавания не установлен: "
+            "pip install \"onnx-asr[cpu,hub]\" soundfile soxr", "warn")
+        return False
+
+    def _new_asr(self):
+        """Создаёт GigaAM-распознаватель. Отдельный метод — удобно подменять в тестах."""
+        from gigaam_asr import recognizer_from_config
+        return recognizer_from_config()
+
+    def _ensure_asr(self):
+        """Ленивая инициализация GigaAM (сама модель грузится в ``preload``)."""
+        if self._asr is not None:
+            return self._asr
+        with self._asr_lock:
+            if self._asr is None:
+                self._asr = self._new_asr()
+        return self._asr
 
     def _ensure_model(self):
         if self._model is not None:
@@ -238,8 +379,18 @@ class Listener:
     # ------------------------------------------------------------------
     #  Калибровка микрофона
     # ------------------------------------------------------------------
+    def warm_audio(self) -> bool:
+        """Поднимает sounddevice/PortAudio заранее (без записи).
+
+        Импорт модуля и инициализация PortAudio стоят ~0.12 с сами по себе, но
+        под нагрузкой (в соседнем потоке грузится голос Piper и держит GIL) —
+        до 1.6 с. Поэтому греем аудио до старта Piper, а не в момент калибровки.
+        """
+        return _sd() is not None
+
     def calibrate(self, duration: float | None = None) -> float:
-        if not HAS_SD:
+        sd = _sd()
+        if sd is None:
             return self.noise_floor
         duration = duration or config.MIC_CALIBRATION_SEC
         log(f"Калибровка микрофона: не говорите {duration:.0f} секунды...", "info")
@@ -273,7 +424,8 @@ class Listener:
         min_speech_sec: float | None = None,
     ):
         """Пишет звук, пока пользователь говорит. Возвращает int16-массив или None."""
-        if not HAS_SD or not HAS_NUMPY:
+        sd = _sd()
+        if sd is None or not HAS_NUMPY:
             raise SpeechError("sounddevice/numpy недоступны — запись невозможна")
 
         max_sec = max_sec or config.MAX_COMMAND_SEC
@@ -330,11 +482,34 @@ class Listener:
     # ------------------------------------------------------------------
     #  Распознавание
     # ------------------------------------------------------------------
-    def transcribe(self, audio) -> str:
-        """int16-массив (или байты PCM) -> текст."""
+    def transcribe(self, audio, sample_rate: int | None = None) -> str:
+        """int16-массив (или байты PCM) -> текст.
+
+        ``sample_rate`` — частота входного буфера; по умолчанию частота
+        микрофона. Указывать её нужно, только если буфер записан с другой
+        частотой (например, WAV на 44.1/48 кГц): GigaAM сам сделает ресемплинг.
+        """
         raw = _pcm16_bytes(audio)
         if not raw:
             return ""
+        rate = int(sample_rate or self.sample_rate)
+        if self.engine == "gigaam":
+            return self._clean(self._transcribe_gigaam(raw, rate))
+        if self.engine == "vosk":
+            return self._clean(self._transcribe_vosk(raw))
+        return ""
+
+    def _transcribe_gigaam(self, raw: bytes, sample_rate: int | None = None) -> str:
+        """GigaAM v3 RNN-T: сырой PCM16 -> текст (ресемплинг внутри модели)."""
+        try:
+            return self._ensure_asr().transcribe(
+                raw, sample_rate=sample_rate or self.sample_rate)
+        except Exception as exc:                       # noqa: BLE001
+            log(f"GigaAM: {exc}", "error")
+            return ""
+
+    def _transcribe_vosk(self, raw: bytes) -> str:
+        """Резервный путь на Vosk."""
         recognizer = self._new_recognizer()
         recognizer.AcceptWaveform(raw)
         try:
@@ -342,7 +517,7 @@ class Listener:
         except (ValueError, TypeError) as exc:
             log(f"Vosk вернул некорректный результат: {exc}", "warn")
             return ""
-        return self._clean(str(result.get("text", "")))
+        return str(result.get("text", ""))
 
     @staticmethod
     def _clean(text: str) -> str:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from pathlib import Path
 
 # Чтобы модули проекта импортировались и при сборке в exe, и при запуске из любой папки.
@@ -63,7 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-wake", action="store_true",
                         help="не требовать слово «Пятница» перед командой")
     parser.add_argument("--vosk-model",
-                        help="папка или имя модели Vosk (по умолчанию из настроек)")
+                        help="папка или имя модели Vosk (резервный движок; "
+                             "основной — GigaAM, см. ASR_ENGINE)")
     parser.add_argument("--voice-name", help="голос edge-tts, например ru-RU-SvetlanaNeural")
     parser.add_argument("--telegram", action="store_true",
                         help="включить Telegram-бота (нужен TELEGRAM_TOKEN)")
@@ -109,13 +111,15 @@ def run_check() -> int:
 
     print("Конфигурация:")
     print(f"  Режим ввода:        {config.DEFAULT_INPUT_MODE}")
-    print(f"  Распознавание:      Vosk «{config.VOSK_MODEL_NAME}»")
     try:
-        from speech import model_path as vosk_model_path
-        vosk_ready = vosk_model_path().exists()
-    except Exception:  # noqa: BLE001
-        vosk_ready = config.VOSK_MODEL_PATH.exists()
-    print(f"  Модель на диске:    {'да' if vosk_ready else 'нет, скачается при запуске'}")
+        from speech import asr_model_ready, engine_label
+        asr_label = engine_label()
+        asr_ready = asr_model_ready()
+    except Exception as exc:  # noqa: BLE001
+        asr_label = f"не удалось определить ({exc})"
+        asr_ready = False
+    print(f"  Распознавание:      {asr_label}")
+    print(f"  Модель на диске:    {'да' if asr_ready else 'нет, скачается при запуске'}")
     try:
         import voices as voice_catalog
         active_voice = voice_catalog.active_name()
@@ -164,8 +168,8 @@ def run_check() -> int:
     print("-" * 64)
 
     problems = []
-    if not config.FEATURES["vosk"]:
-        problems.append("pip install vosk            (распознавание речи)")
+    if not config.FEATURES["gigaam"]:
+        problems.append("pip install \"onnx-asr[cpu,hub]\"  (распознавание речи, GigaAM)")
     if not config.FEATURES["piper"]:
         problems.append("pip install piper-tts        (основная озвучка)")
     if not config.FEATURES["edge_tts"]:
@@ -215,6 +219,65 @@ def run_list_voices() -> int:
         for voice in voices:
             print(f"  {voice['name']:<28} {voice['gender']}")
     return 0
+
+
+class _OverlayLauncher(threading.Thread):
+    """Поднимает настольное окно в фоновом потоке.
+
+    Подготовка Electron (проверка сборки, поиск node, запуск процесса) занимает
+    от долей секунды до десятков — если сборка устарела, идёт ``npm run build``.
+    Раньше это выполнялось до старта голосового цикла: ассистент молчал, пока
+    собирался интерфейс. Теперь окно догоняет уже работающее ядро, а при
+    выключении мы гасим его, даже если запуск ещё не завершился.
+    """
+
+    def __init__(self, api_url: str, rebuild: bool, speak_errors: bool) -> None:
+        super().__init__(name="overlay-launch", daemon=True)
+        self._api_url = api_url
+        self._rebuild = rebuild
+        self._speak_errors = speak_errors
+        self._process = None
+        self._stop_requested = False
+        self._lock = threading.Lock()
+
+    def run(self) -> None:
+        from utils import log
+
+        process = None
+        try:
+            import overlay
+
+            process = overlay.run(self._api_url, rebuild=self._rebuild)
+        except Exception as exc:  # noqa: BLE001
+            log(f"Не удалось запустить окно: {exc}", "error")
+            process = None
+
+        with self._lock:
+            self._process = process
+            stop_now = self._stop_requested
+        if process is None:
+            print("[!] Окно не запустилось — работаю в консоли.")
+            print("    Проверьте окружение: python main.py --check")
+            if self._speak_errors:
+                # Консоли нет: без голосового сообщения поломка окна выглядит
+                # как «приложение вообще не запускается».
+                try:
+                    import tts
+
+                    tts.speak("Не удалось открыть настольное окно, сэр. "
+                              "Работаю голосом. Подробности в журнале.")
+                except Exception:  # noqa: BLE001
+                    pass
+        elif stop_now:
+            # Ассистента выключили, пока окно ещё поднималось.
+            process.stop()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._stop_requested = True
+            process = self._process
+        if process is not None:
+            process.stop()
 
 
 def _local_http_json(url: str, timeout: float = 1.5) -> dict | None:
@@ -347,23 +410,12 @@ def main() -> int:
             print(f"[i] Окно отключено (--no-desktop). API ядра: {ui.url}")
     else:
         # Сборка и запуск окна: Python остаётся мозгом, Electron — только UI.
-        import overlay
-
-        process = overlay.run(ui.url if ui.running else "", rebuild=args.rebuild_desktop)
-        if process is not None:
-            pyatnitsa.add_shutdown_hook(process.stop)
-        else:
-            print("[!] Окно не запустилось — работаю в консоли.")
-            print("    Проверьте окружение: python main.py --check")
-            if config.BACKGROUND_MODE and not args.no_tts:
-                # Консоли нет: без голосового сообщения поломка окна выглядит
-                # как «приложение вообще не запускается».
-                try:
-                    import tts
-                    tts.speak("Не удалось открыть настольное окно, сэр. "
-                              "Работаю голосом. Подробности в журнале.")
-                except Exception:  # noqa: BLE001
-                    pass
+        # Запускаем в фоне: голос должен быть готов сразу, а окно догонит.
+        window = _OverlayLauncher(ui.url if ui.running else "",
+                                  rebuild=args.rebuild_desktop,
+                                  speak_errors=config.BACKGROUND_MODE and not args.no_tts)
+        pyatnitsa.add_shutdown_hook(window.stop)
+        window.start()
 
     try:
         pyatnitsa.run()

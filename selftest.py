@@ -386,10 +386,12 @@ def main() -> int:
     for phrase, expected in reminder_cases:
         check(f"«{phrase}»", pyatnitsa._extract_reminder_text(phrase), expected)
 
-    # ---------------- Фильтрация распознавания (Vosk) ----------------
-    section("Vosk: артефакты, повторы и распознавание")
+    # ---------------- Фильтрация распознавания (GigaAM / Vosk) ----------------
+    section("Распознавание: артефакты, повторы и оба движка")
 
     class _RecognizerStub:
+        """Заглушка Vosk-распознавателя."""
+
         def __init__(self, text):
             self.text = text
             self.words = False
@@ -403,7 +405,25 @@ def main() -> int:
         def FinalResult(self):
             return json.dumps({"text": self.text})
 
+    class _AsrStub:
+        """Заглушка GigaAM-распознавателя: тот же контракт, что у настоящего."""
+
+        def __init__(self, text):
+            self.text = text
+            self.model_ready = True
+            self.model_name = "gigaam-v3-rnnt-stub"
+            self.calls = []
+
+        def transcribe(self, audio, sample_rate=None):
+            self.calls.append((len(audio), sample_rate))
+            return self.text
+
+        def preload(self):
+            return True
+
     listener = Listener()
+    # Vosk-путь: подменяем распознаватель, движок фиксируем явно.
+    listener.engine = "vosk"
     listener._new_recognizer = lambda: _RecognizerStub("какая погода")
     check("достоверная речь проходит",
           listener.transcribe(np.array([1, 2], dtype=np.int16)), "какая погода")
@@ -412,11 +432,24 @@ def main() -> int:
     check("тишина даёт пустую строку",
           listener.transcribe(np.array([0], dtype=np.int16)), "")
 
+    # GigaAM-путь: тот же вызов transcribe, другой движок внутри.
+    gigaam_listener = Listener()
+    gigaam_listener.engine = "gigaam"
+    stub = _AsrStub("какая погода")
+    gigaam_listener._asr = stub
+    check("GigaAM-движок отдаёт текст",
+          gigaam_listener.transcribe(np.array([1, 2], dtype=np.int16)), "какая погода")
+    check("GigaAM получил PCM16 и частоту микрофона",
+          stub.calls and stub.calls[0][1] == gigaam_listener.sample_rate, True)
+    check("GigaAM: пустой буфер не доходит до модели",
+          gigaam_listener.transcribe(np.array([], dtype=np.int16)), "")
+
     check("артефакт «продолжение следует» отброшен",
           Listener._clean("продолжение следует"), "")
     check("повтор одного слова отброшен", Listener._clean("ну ну ну ну"), "")
     check("обычная фраза сохраняется", Listener._clean("какая погода"), "какая погода")
-    check("модель Vosk распакована", isinstance(speech.model_ready(), bool), True)
+    check("модель активного движка проверяема", isinstance(speech.asr_model_ready(), bool), True)
+    check("имя движка для статуса непустое", bool(speech.engine_label()), True)
     check("пунктуация удаляется только для команд", normalize_command_text("погода в Минске."),
           "погода в минске")
 
@@ -747,7 +780,8 @@ def main() -> int:
     check("data-папка создана", config.DATA_DIR.exists(), True)
     check("папка моделей создана", config.MODELS_DIR.exists(), True)
     check("numpy доступен", config.FEATURES["numpy"], True)
-    check("Vosk доступен", config.FEATURES["vosk"], True)
+    check("GigaAM (onnx-asr) доступен", config.FEATURES["gigaam"], True)
+    check("движок распознавания по умолчанию — GigaAM", config.ASR_ENGINE, "gigaam")
     check("edge-tts доступен", config.FEATURES["edge_tts"], True)
     check("версия совпадает с __init__.py",
           f'__version__ = "{config.APP_VERSION}"' in
@@ -842,13 +876,16 @@ def main() -> int:
           voices.tone_profile("irina"), {})
 
     # Подъём тона и темп независимы: синтез растягивается на столько же,
-    # на сколько пересчёт отсчётов его укорачивает.
+    # на сколько пересчёт отсчётов его укорачивает. Ожидаемое значение берём из
+    # самого профиля: раньше здесь стояло «1.10», и после подстройки тембра на
+    # слух тест краснел, хотя голос работал правильно.
+    brisk_pitch = round(float(tone.PROFILES["brisk"]["pitch"]), 2)
     check("тон голоса берётся из профиля",
-          round(voices.tone_pitch("mari"), 2), 1.10)
+          round(voices.tone_pitch("mari"), 2), brisk_pitch)
     check("у голоса без профиля тон не меняется",
           voices.tone_pitch("irina"), 1.0)
     check("length_scale компенсирует подъём тона",
-          round(voices.length_scale("mari", 1.35), 4), round(1.10 / 1.35, 4))
+          round(voices.length_scale("mari", 1.35), 4), round(brisk_pitch / 1.35, 4))
     check("length_scale без профиля — просто обратный темп",
           round(voices.length_scale("irina", 1.2), 4), round(1 / 1.2, 4))
     # За пределами 0.8..1.35 голос звучит «из бочки» или по-мультяшному.

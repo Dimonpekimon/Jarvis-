@@ -19,10 +19,21 @@ import time
 from collections import deque
 from pathlib import Path
 
-import requests
-
 import config
 from utils import log
+
+# requests тянет urllib3 и certifi (≈0.2 с и 14 МБ) — импортируем по требованию:
+# на старте он нужен только для первого сетевого запроса, а не для запуска.
+_REQUESTS = None
+
+
+def _requests():
+    """Модуль requests (кэшируется после первого импорта)."""
+    global _REQUESTS
+    if _REQUESTS is None:
+        import requests
+        _REQUESTS = requests
+    return _REQUESTS
 
 _MARKDOWN_PATTERNS = [
     (re.compile(r"\*\*(.+?)\*\*"), r"\1"),
@@ -63,10 +74,10 @@ class Brain:
         self.model = model or config.GEMINI_MODEL
         self.api_base = str(config.GEMINI_API_BASE).rstrip("/")
         self.history: deque = deque(maxlen=config.LLM_HISTORY_SIZE)
-        self._session = requests.Session()
-        # Gemini — внешний сервис, поэтому системный прокси здесь как раз нужен
-        # (в отличие от прежней локальной Ollama, где он всё ломал).
-        self._session.trust_env = True
+        # Сессия создаётся при первом обращении (см. свойство session):
+        # импорт requests и открытие пула соединений не должны задерживать
+        # запуск ассистента.
+        self._session = None
         self._available: bool | None = None
         self._models: list = []
         self._probe_after = 0.0
@@ -74,6 +85,17 @@ class Brain:
         # Некоторые модели (например, flash-lite) не принимают thinkingConfig.
         # После первого отказа запоминаем это и больше не мешаем запрос.
         self._thinking_supported = True
+
+    @property
+    def session(self):
+        """HTTP-сессия Gemini (создаётся лениво, при первом запросе)."""
+        if self._session is None:
+            # Gemini — внешний сервис, поэтому системный прокси здесь как раз
+            # нужен (в отличие от прежней локальной Ollama, где он всё ломал).
+            session = _requests().Session()
+            session.trust_env = True
+            self._session = session
+        return self._session
 
     # ------------------------------------------------------------------
     #  Ключ и доступность
@@ -107,7 +129,7 @@ class Brain:
                 and time.monotonic() < self._probe_after):
             return self._models
         try:
-            response = self._session.get(
+            response = self.session.get(
                 f"{self.api_base}/models",
                 params={"key": self.api_key},
                 timeout=10,
@@ -253,15 +275,15 @@ class Brain:
         key = self._require_key()
         url = f"{self.api_base}/models/{model}:generateContent"
         try:
-            response = self._session.post(
+            response = self.session.post(
                 url, params={"key": key}, json=payload,
                 timeout=float(config.GEMINI_TIMEOUT),
             )
-        except requests.exceptions.Timeout as exc:
+        except _requests().exceptions.Timeout as exc:
             raise _TryNextModel(
                 f"Модель «{model}» не ответила за {config.GEMINI_TIMEOUT} с."
             ) from exc
-        except requests.exceptions.RequestException as exc:
+        except _requests().exceptions.RequestException as exc:
             raise BrainUnavailable(
                 f"Нет связи с Gemini ({exc.__class__.__name__}). Проверьте интернет."
             ) from exc
@@ -270,11 +292,11 @@ class Brain:
             # Бесплатный тариф считает запросы в минуту: короткая пауза помогает.
             time.sleep(1.5)
             try:
-                response = self._session.post(
+                response = self.session.post(
                     url, params={"key": key}, json=payload,
                     timeout=float(config.GEMINI_TIMEOUT),
                 )
-            except requests.exceptions.RequestException as exc:
+            except _requests().exceptions.RequestException as exc:
                 raise BrainUnavailable(
                     f"Нет связи с Gemini ({exc.__class__.__name__})."
                 ) from exc

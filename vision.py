@@ -18,7 +18,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from pathlib import Path
 
@@ -32,7 +31,12 @@ def _run_async(factory):
 
     Vision вызывается и из главного цикла, и из потока Telegram-бота,
     где цикл уже запущен — там ``asyncio.run`` бросил бы исключение.
+
+    ``asyncio`` импортируется здесь, а не на уровне модуля: он стоит ~70 мс и
+    нужен только OCR-пути, а не запуску ассистента.
     """
+    import asyncio
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:

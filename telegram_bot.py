@@ -16,19 +16,17 @@
 
 from __future__ import annotations
 
-import asyncio
 import threading
 
 import config
 from utils import log
 
-try:
-    from telegram import Update
-    from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-    HAS_TELEGRAM = True
-except ImportError:
-    HAS_TELEGRAM = False
-
+# python-telegram-bot НЕ импортируется на старте: библиотека тянет httpx и rich
+# (≈0.4 с и ~20 МБ памяти), а бот по умолчанию выключен — платить за это при
+# каждом запуске бессмысленно. Наличие пакета проверяет config.FEATURES (это
+# find_spec, без загрузки модуля), а сам импорт живёт в _run(), то есть в потоке
+# бота, который поднимается только при TELEGRAM_ENABLED = true.
+HAS_TELEGRAM = bool(config.FEATURES.get("telegram"))
 
 #: Лимит Telegram — 4096 символов; берём с запасом.
 TELEGRAM_MAX_MESSAGE_LEN = 4000
@@ -128,6 +126,8 @@ class TelegramBridge:
         )
 
     async def _cmd_status(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        import asyncio
+
         if not self._is_allowed(update):
             return
         if callable(self.status_provider):
@@ -138,6 +138,8 @@ class TelegramBridge:
         await self._reply(update, text)
 
     async def _cmd_reset(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        import asyncio
+
         if not self._is_allowed(update):
             return
         if callable(self.reset_callback):
@@ -146,6 +148,8 @@ class TelegramBridge:
         await update.message.reply_text("История диалога очищена, сэр.")
 
     async def _on_message(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        import asyncio
+
         if not update.message or not update.message.text:
             return
         if not self._is_allowed(update):
@@ -188,6 +192,11 @@ class TelegramBridge:
         return True
 
     def _run(self) -> None:
+        # Импорт именно здесь: библиотека нужна только работающему боту.
+        import asyncio
+
+        from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)
@@ -217,6 +226,8 @@ class TelegramBridge:
                 pass
 
     def stop(self) -> None:
+        import asyncio
+
         app, loop = self._app, self._loop
         if app is None or loop is None or loop.is_closed():
             return
@@ -240,6 +251,8 @@ class TelegramBridge:
     # ------------------------------------------------------------------
     def broadcast(self, text: str) -> None:
         """Отправляет сообщение во все чаты, которые писали боту."""
+        import asyncio
+
         app, loop = self._app, self._loop
         if not text or app is None or loop is None or loop.is_closed() or not self._chats:
             return

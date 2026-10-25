@@ -6,8 +6,16 @@ numpy>=2.0
 requests>=2.31
 sounddevice>=0.4.6
 
-# --- Распознавание речи (Vosk, локально) ---
-vosk>=0.3.45
+# --- Распознавание речи (GigaAM v3 RNN-T, локально, ONNX Runtime) ---
+# Модель: Salute Developers / SberDevices, лицензия MIT (см. gigaam_asr.py).
+# extra [cpu] тянет onnxruntime, [hub] — huggingface-hub для первой загрузки.
+onnx-asr[cpu,hub]>=0.12
+onnxruntime>=1.18,<2
+soundfile>=0.12            # WAV PCM 8/16/24/32 -> numpy (вход модели)
+soxr>=0.4                  # ресемплинг 44.1/48 кГц -> 16 кГц (не librosa: GPL)
+
+# --- Резерв распознавания (не нужен для продукта, ASR_ENGINE="vosk") ---
+# vosk>=0.3.45
 
 # --- Синтез речи (Piper — основной, офлайн) ---
 piper-tts>=1.2

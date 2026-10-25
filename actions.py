@@ -22,8 +22,6 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
-import requests
-
 import config
 from utils import (
     CalcError,
@@ -34,6 +32,19 @@ from utils import (
     safe_calculate,
     words_to_number,
 )
+
+# requests импортируется по требованию: он нужен только для погоды и поиска в
+# сети, а на старте стоил бы ~0.2 с и 14 МБ (см. brain._requests).
+_REQUESTS = None
+
+
+def _requests():
+    """Модуль requests (кэшируется после первого импорта)."""
+    global _REQUESTS
+    if _REQUESTS is None:
+        import requests
+        _REQUESTS = requests
+    return _REQUESTS
 
 # =====================================================================
 #  РАЗБОР ДЛИТЕЛЬНОСТИ
@@ -807,7 +818,7 @@ class Actions:
                     "https://geocoding-api.open-meteo.com/v1/search"
                     f"?name={urllib.parse.quote(name)}&count=1&language=ru&format=json"
                 )
-                response = requests.get(url, timeout=timeout).json()
+                response = _requests().get(url, timeout=timeout).json()
             except Exception as exc:  # noqa: BLE001
                 log(f"Геокодер: «{name}» не ответил "
                     f"(попытка {attempt + 1}/{attempts}): {exc}", "debug")
@@ -959,7 +970,7 @@ def _http_json(url: str, timeout: float, attempts: int = _GEOCODE_ATTEMPTS) -> d
     """
     for attempt in range(max(1, attempts)):
         try:
-            return requests.get(url, timeout=timeout).json()
+            return _requests().get(url, timeout=timeout).json()
         except Exception as exc:  # noqa: BLE001
             log(f"Запрос {url.split('?')[0]} не удался "
                 f"(попытка {attempt + 1}/{attempts}): {exc}", "debug")

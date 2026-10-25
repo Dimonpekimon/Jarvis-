@@ -21,7 +21,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import ctypes
 import hashlib
 import queue
@@ -42,17 +41,33 @@ try:
 except ImportError:
     HAS_NUMPY = False
 
-try:
-    import sounddevice as sd
-    HAS_SD = True
-except ImportError:
-    HAS_SD = False
+# sounddevice и PyAV импортируются по требованию: они нужны только для вывода
+# звука (PyAV — вообще лишь для mp3 от edge-tts), а их импорт стоит ~120 и
+# ~110 мс на старте и ~17 МБ памяти. Наличие пакета проверяет config.FEATURES
+# (это find_spec — без загрузки модуля), поэтому решение принимается сразу.
+HAS_SD = bool(config.FEATURES.get("sounddevice"))
+HAS_AV = bool(config.FEATURES.get("av"))
 
-try:
-    import av
-    HAS_AV = True
-except ImportError:
-    HAS_AV = False
+_SD = None
+_AV = None
+
+
+def _sd():
+    """Модуль sounddevice (None, если его нет). Кэшируется после первого импорта."""
+    global _SD
+    if _SD is None and HAS_SD:
+        import sounddevice
+        _SD = sounddevice
+    return _SD
+
+
+def _av():
+    """Модуль PyAV (None, если его нет). Кэшируется после первого импорта."""
+    global _AV
+    if _AV is None and HAS_AV:
+        import av
+        _AV = av
+    return _AV
 
 
 class _SpeechCancelled(Exception):
@@ -73,6 +88,9 @@ _MCI_ALIAS = "pyatnitsa_tts_play"
 
 def _decode_with_pyav(path: Path, target_rate: int = 24000):
     """Декодирует mp3/wav в моно int16 через PyAV. Возвращает (numpy, rate)."""
+    av = _av()
+    if av is None:
+        raise RuntimeError("PyAV не установлен: pip install av")
     container = av.open(str(path))
     try:
         stream = container.streams.audio[0]
@@ -164,7 +182,8 @@ def stop_playback() -> None:
     Вызывается из ``Speaker.stop()`` (то есть из чужого потока), поэтому не
     трогает COM/SAPI — тот останавливает сам себя в своём рабочем потоке.
     """
-    if HAS_SD:
+    sd = _sd()
+    if sd is not None:
         try:
             sd.stop()
         except Exception:  # noqa: BLE001
@@ -207,6 +226,9 @@ def _play_decoded(audio, rate: int, on_level=None,
     """Проигрывает массив через sounddevice, попутно сообщая громкость."""
     if cancel is not None and cancel.is_set():
         raise _SpeechCancelled
+    sd = _sd()
+    if sd is None:
+        raise RuntimeError("sounddevice не установлен: pip install sounddevice")
     stop = threading.Event()
     if callable(on_level) and HAS_NUMPY and len(audio):
         threading.Thread(target=_level_monitor, args=(audio, rate, stop, on_level),
@@ -380,6 +402,8 @@ def prune_tts_cache(cache_dir: Path | None = None, *, now: float | None = None) 
 
 def _edge_synthesize(text: str, out_path: Path) -> None:
     """Синтез через edge-tts (асинхронный API внутри синхронной обёртки)."""
+    import asyncio
+
     import edge_tts
 
     async def _run():
@@ -397,6 +421,8 @@ def _edge_synthesize(text: str, out_path: Path) -> None:
 
 def list_edge_voices(language_filter: str = "ru") -> list:
     """Список доступных голосов edge-tts (для флага --list-voices)."""
+    import asyncio
+
     import edge_tts
 
     async def _run():
@@ -860,7 +886,6 @@ class Speaker:
     def _speak_piper(self, text: str, cancel: threading.Event | None = None) -> None:
         if cancel is not None and cancel.is_set():
             raise _SpeechCancelled
-        voice = self._load_piper_voice()
 
         model_path = piper_model_path()
         # ВАЖНО: состав ключа повторяет Electron (desktop/src/main/ttsAudio.ts) —
@@ -875,6 +900,11 @@ class Speaker:
         out = config.CACHE_DIR / f"{key}.wav"
 
         if not self._piper_cache_valid(out):
+            # Голос грузим только когда действительно нужен синтез: готовая
+            # фраза из кэша (приветствие, частые ответы) должна звучать сразу,
+            # не дожидаясь двух секунд загрузки модели. На первом запуске
+            # загрузку всё равно ведёт warmup() в фоновом потоке.
+            voice = self._load_piper_voice()
             # Проверяем подпись профиля до синтеза: если тембр сменили, старый
             # кэш уже удалён и эта фраза соберётся заново. Чтение одного
             # маленького файла на новую фразу — дешевле, чем неверное звучание.

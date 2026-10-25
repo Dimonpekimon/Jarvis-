@@ -29,7 +29,9 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 # Версия приложения. Одна на всё: заголовок в логе, API, диагностика.
 # __init__.__version__ держим в том же виде — selftest сверяет их.
-APP_VERSION = "3.4.0"
+# Суффикс -experimental: сборка с GigaAM помечена как эксперимент (нагрузка на
+# процессор выше, чем у Vosk, см. README). Проверенная сборка на Vosk — v3.4.0.
+APP_VERSION = "3.5.0-experimental"
 
 # Имя ассистента. Одна точка правды: отсюда берут его промпт нейросети,
 # заголовок процесса и имя файла со списком команд. Обращение (WAKE_WORDS)
@@ -91,7 +93,7 @@ MAX_COMMAND_SEC = 15.0              # максимум записи одной �
 SILENCE_SEC = 0.5                   # столько тишины = конец фразы
 MIN_SPEECH_SEC = 0.3                # фраза короче — игнорируется
 VAD_RMS_THRESHOLD = 0.010           # абсолютный порог «тишины» (0..1)
-MIC_CALIBRATION_SEC = 2.0           # длительность калибровки фонового шума
+MIC_CALIBRATION_SEC = 1.2           # длительность калибровки фонового шума
 MIC_CLEAR_GUARD = 0.3               # пауза после конца озвучки перед записью
 
 # Обращение к ассистенту. Vosk работает без грамматики, поэтому подойдёт любое
@@ -133,11 +135,31 @@ DIALOG_SHORT_REPLIES = ["да", "нет", "ага", "угу", "конечно", 
                         "хорошо", "ладно", "окей", "ок"]
 
 # =====================================================================
-#  VOSK — РАСПОЗНАВАНИЕ РЕЧИ (локально, офлайн)
+#  РАСПОЗНАВАНИЕ РЕЧИ (локально, офлайн)
 # =====================================================================
-# Небольшая русская модель (~45 МБ) распознаёт за доли секунды на CPU и не
-# требует ни GPU, ни интернета после первого скачивания. Если папки модели
-# нет, speech.py скачает и распакует её автоматически.
+# Основной движок — GigaAM v3 RNN-T (Salute Developers / SberDevices, MIT)
+# через ONNX Runtime: точнее Vosk на русском (4.39 % против ~10 % WER),
+# не требует GPU и интернета после первого скачивания модели. Вся логика —
+# в gigaam_asr.py; speech.py только выбирает движок.
+ASR_ENGINE = "gigaam"               # gigaam | vosk | auto (auto = gigaam, иначе vosk)
+
+# Имя модели в каталоге onnx-asr: gigaam-v3-rnnt | gigaam-v3-ctc | ...
+# RNN-T точнее CTC, поэтому по умолчанию именно он.
+GIGAAM_MODEL_NAME = "gigaam-v3-rnnt"
+GIGAAM_MODEL_DIR = MODELS_DIR / "gigaam-v3-rnnt"
+# None — полная fp32-модель (≈890 МБ); "int8" — квантованная (≈226 МБ,
+# вчетверо меньше на диске и в памяти). Скорость на CPU сопоставима, точность
+# может просесть на десятые доли п.п. WER. Для слабых ПК и малых дисков —
+# int8; если важна максимальная точность, поставьте null.
+GIGAAM_QUANTIZATION = "int8"
+# 0 — не трогать настройки ONNX Runtime (он сам берёт физические ядра).
+# Ставить число «на глаз» нельзя: лишние потоки на слабом CPU только мешают.
+GIGAAM_NUM_THREADS = 0
+GIGAAM_MAX_WINDOW_SEC = 22.0        # предел одного окна (модель обучена на 30 с)
+
+# --- Резерв: Vosk -----------------------------------------------------
+# Оставлен как аварийный путь, если onnx-asr не установлен (ASR_ENGINE="auto"
+# или "vosk"). Для продукта не нужен: модель GigaAM лучше на русском.
 VOSK_MODEL_NAME = "vosk-model-small-ru-0.22"
 VOSK_MODEL_PATH = MODELS_DIR / VOSK_MODEL_NAME
 VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip"
@@ -297,6 +319,8 @@ _TUNABLE = [
     "DIALOG_SHORT_REPLIES",
     "VOSK_MODEL_NAME", "VOSK_MODEL_PATH", "VOSK_MODEL_URL", "VOSK_AUTO_DOWNLOAD",
     "VOSK_SAMPLE_RATE", "VOSK_WORDS",
+    "ASR_ENGINE", "GIGAAM_MODEL_NAME", "GIGAAM_MODEL_DIR", "GIGAAM_QUANTIZATION",
+    "GIGAAM_NUM_THREADS", "GIGAAM_MAX_WINDOW_SEC",
     "TTS_ENGINE", "TTS_VOICE", "TTS_RATE", "TTS_VOLUME", "TTS_PITCH", "TTS_USE_CACHE",
     "TTS_CACHE_MAX_FILES", "TTS_CACHE_TTL_DAYS",
     "PIPER_MODEL", "PIPER_VOICE", "PIPER_MODEL_URL", "PIPER_CONFIG_URL",
@@ -314,7 +338,7 @@ _TUNABLE = [
 ]
 
 _STRING_PATHS = {"PIPER_MODEL", "SCREENSHOT_DIR", "NOTES_FILE", "REMINDERS_FILE",
-                 "COMMANDS_FILE", "VOSK_MODEL_PATH"}
+                 "COMMANDS_FILE", "VOSK_MODEL_PATH", "GIGAAM_MODEL_DIR"}
 
 
 def _load_settings() -> dict:
@@ -389,6 +413,7 @@ def _has(module_name: str) -> bool:
 FEATURES = {
     "sounddevice": _has("sounddevice"),
     "numpy": _has("numpy"),
+    "gigaam": _has("onnx_asr") and _has("onnxruntime"),
     "vosk": _has("vosk"),
     "edge_tts": _has("edge_tts"),
     "piper": _has("piper"),
@@ -412,7 +437,8 @@ def feature_report() -> list:
     labels = {
         "sounddevice": "Микрофон (sounddevice)",
         "numpy": "Численные расчёты (numpy)",
-        "vosk": "Распознавание речи (Vosk)",
+        "gigaam": "Распознавание речи (GigaAM v3 RNN-T, ONNX)",
+        "vosk": "Распознавание речи (Vosk, резерв)",
         "edge_tts": "Нейронный голос (edge-tts)",
         "piper": "Офлайн-голос (piper)",
         "pyttsx3": "Резервный голос (pyttsx3/SAPI)",
