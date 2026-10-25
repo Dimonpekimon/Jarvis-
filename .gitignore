@@ -25,6 +25,9 @@ build/
 dist/
 outputs/
 
+# Скачанные архивы прошлых релизов (например v3.4.0 на Vosk) — не часть кода
+releases/
+
 # Копия pythonw.exe под именем ассистента — создаётся make_shortcut.py
 Пятница.exe
 Джарвис.exe
